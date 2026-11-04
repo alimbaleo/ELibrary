@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using ELibrary.Core.Enums;
 using ELibrary.Core.Models;
 using ELibrary.Core.Services;
@@ -12,128 +13,64 @@ namespace ELibrary.Controllers
     [Route("[controller]/[action]")]
     public class LibraryController : ControllerBase
     {
-       
         private readonly ILogger<LibraryController> _logger;
-        private readonly LibraryCoordinator _libraryCoordinator;
-        public LibraryController(ILogger<LibraryController> logger, LibraryCoordinator libraryCoordinator)
+        private readonly LibraryCoordinator _coordinator;
+
+        public LibraryController(ILogger<LibraryController> logger, LibraryCoordinator coordinator)
         {
             _logger = logger;
-            _libraryCoordinator = libraryCoordinator;
+            _coordinator = coordinator;
         }
 
-        
-        
         [HttpGet(Name = "search")]
-        public async Task<ActionResult<SearchBookResponse>> Search([FromQuery] SearchBookRequest request)
-        {
-            try
-            {
-                var resp = await _libraryCoordinator.SearchBooks(request.Page, request.SearchText);
-                if (resp.Success)
-                {
-                    return resp.Data;   
-                }
-                else
-                {
-                    return BadRequest(resp.Message);
-                }
-            }
-            catch (Exception ex)
-            {
-                return  BadRequest(ex.Message);
-            }
-        }
-        
-        
-        
+        [ProducesResponseType(typeof(SearchBookResponse), StatusCodes.Status200OK)]
+        public Task<IActionResult> Search([FromQuery] SearchBookRequest request)
+            => Execute("Search", new { request.SearchText, request.Page },
+                () => _coordinator.SearchBooks(request.Page, request.SearchText));
+
         [HttpGet(Name = "searchTopic")]
-        public async Task<ActionResult<SearchBookResponse>> SearchTopic([FromQuery] SearchBookByTopicRequest request)
+        [ProducesResponseType(typeof(SearchBookResponse), StatusCodes.Status200OK)]
+        public Task<IActionResult> SearchTopic([FromQuery] SearchBookByTopicRequest request)
+            => Execute("SearchTopic", new { request.Topic, request.Page },
+                () => _coordinator.SearchBooksByTopic(request.Page, request.Topic));
+
+        [HttpGet("{id}", Name = "summary")]
+        [ProducesResponseType(typeof(BookSummary), StatusCodes.Status200OK)]
+        public Task<IActionResult> Summary(string id, BookSource source)
+            => Execute("Summary", new { id, source }, () => _coordinator.GetBookSummaryById(source, id));
+
+        [HttpGet("{id}", Name = "book")]
+        [ProducesResponseType(typeof(string), StatusCodes.Status200OK)]
+        public Task<IActionResult> Book(string id, BookSource source)
+            => Execute("Book", new { id, source }, () => _coordinator.GetBookById(source, id));
+
+        [HttpGet("{id}", Name = "image")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        public Task<IActionResult> Image(string id, BookSource source)
+            => Execute("Image", new { id, source }, () => _coordinator.GetImageById(source, id));
+
+        private async Task<IActionResult> Execute<T>(string operation, object context, Func<Task<Response<T>>> action)
         {
+            var stopwatch = Stopwatch.StartNew();
+            _logger.LogInformation("{Operation} started {@Context}", operation, context);
+
             try
             {
-                var resp = await _libraryCoordinator.SearchBooksByTopic(request.Page, request.Topic);
-                if (resp.Success)
+                var response = await action();
+                if (!response.Success)
                 {
-                    return resp.Data;
+                    _logger.LogWarning("{Operation} failed in {ElapsedMs}ms: {Message} {@Context}",
+                        operation, stopwatch.ElapsedMilliseconds, response.Message, context);
+                    return BadRequest(response.Message);
                 }
-                else
-                {
-                    return BadRequest(resp.Message);
-                }
+
+                _logger.LogInformation("{Operation} completed in {ElapsedMs}ms {@Context}", operation, stopwatch.ElapsedMilliseconds, context);
+                return response.Data is IActionResult actionResult ? actionResult : Ok(response.Data);
             }
             catch (Exception ex)
             {
-                return  BadRequest(ex.Message);
-            }
-        }
-        
-        
-        
-        [HttpGet("{id}",Name = "summary")]
-        public async Task<ActionResult<BookSummary>> Summary(string id, BookSource source)
-        {
-            try
-            {
-                var resp = await _libraryCoordinator.GetBookSummaryById(source, id);
-                if (resp.Success)
-                {
-                    resp.Data.Source = source;
-                    return resp.Data;
-                }
-                else
-                {
-                    return BadRequest(resp.Message);
-                }
-            }
-            catch (Exception ex)
-            {
-                return  BadRequest(ex.Message);
-            }
-        }
-        
-        
-        
-        [HttpGet("{id}",Name = "book")]
-        public async Task<ActionResult<string>> Book(string id, BookSource source)
-        {
-            try
-            {
-                var resp = await _libraryCoordinator.GetBookById(source, id);
-                if (resp.Success)
-                {
-                    return resp.Data;
-                }
-                else
-                {
-                    return BadRequest(resp.Message);
-                }
-            }
-            catch (Exception ex)
-            {
-                return  BadRequest(ex.Message);
-            }
-        }
-        
-        
-        
-        [HttpGet("{id}",Name = "image")]
-        public async Task<ActionResult> Image(string id, BookSource source)
-        {
-            try
-            {
-                var resp = await _libraryCoordinator.GetImageById(source, id);
-                if (resp.Success)
-                {
-                    return resp.Data;
-                }
-                else
-                {
-                    return BadRequest(resp.Message);
-                }
-            }
-            catch (Exception ex)
-            {
-                return  BadRequest(ex.Message);
+                _logger.LogError(ex, "{Operation} threw after {ElapsedMs}ms {@Context}", operation, stopwatch.ElapsedMilliseconds, context);
+                return BadRequest(ex.Message);
             }
         }
     }

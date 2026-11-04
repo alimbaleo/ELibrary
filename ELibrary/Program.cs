@@ -25,6 +25,7 @@ namespace ELibrary
             builder.Services.AddSingleton<IConfiguration>(builder.Configuration);
             builder.Services.AddScoped<IApiClient, ApiClient>();
             builder.Services.AddScoped<ILibraryService, GutendexService>();
+            builder.Services.AddScoped<ILibraryService, OpenLibraryService>();
             builder.Services.AddScoped<ILibraryService, GoogleService>();
             builder.Services.AddScoped<ILibraryService, DoaBooksService>();
             builder.Services.AddScoped<LibraryCoordinator>();

@@ -1,4 +1,4 @@
-using ELibrary.Core.Enums;
+﻿using ELibrary.Core.Enums;
 using ELibrary.Core.Models;
 using ELibrary.Core.Services;
 using ELibrary.Models;
@@ -35,12 +35,12 @@ namespace ELibrary.Controllers
                 }
                 else
                 {
-                    return BadRequest(resp.Message);
+                    return Failure(resp);
                 }
             }
             catch (Exception ex)
             {
-                return  BadRequest(ex.Message);
+                return UnexpectedError(ex);
             }
         }
         
@@ -58,12 +58,12 @@ namespace ELibrary.Controllers
                 }
                 else
                 {
-                    return BadRequest(resp.Message);
+                    return Failure(resp);
                 }
             }
             catch (Exception ex)
             {
-                return  BadRequest(ex.Message);
+                return UnexpectedError(ex);
             }
         }
         
@@ -82,12 +82,12 @@ namespace ELibrary.Controllers
                 }
                 else
                 {
-                    return BadRequest(resp.Message);
+                    return Failure(resp);
                 }
             }
             catch (Exception ex)
             {
-                return  BadRequest(ex.Message);
+                return UnexpectedError(ex);
             }
         }
         
@@ -105,12 +105,12 @@ namespace ELibrary.Controllers
                 }
                 else
                 {
-                    return BadRequest(resp.Message);
+                    return Failure(resp);
                 }
             }
             catch (Exception ex)
             {
-                return  BadRequest(ex.Message);
+                return UnexpectedError(ex);
             }
         }
         
@@ -128,13 +128,30 @@ namespace ELibrary.Controllers
                 }
                 else
                 {
-                    return BadRequest(resp.Message);
+                    return Failure(resp);
                 }
             }
             catch (Exception ex)
             {
-                return  BadRequest(ex.Message);
+                return UnexpectedError(ex);
             }
+        }
+
+        /// <summary>
+        /// Maps a failed provider response to an HTTP status: 404 when the book doesn't exist,
+        /// 502 when the upstream provider failed (down, blocked, timed out), 400 otherwise.
+        /// </summary>
+        private ActionResult Failure<T>(Response<T> resp) => resp.ErrorType switch
+        {
+            ErrorType.NotFound => NotFound(resp.Message),
+            ErrorType.Upstream => StatusCode(StatusCodes.Status502BadGateway, resp.Message),
+            _ => BadRequest(resp.Message)
+        };
+
+        private ActionResult UnexpectedError(Exception ex)
+        {
+            _logger.LogError(ex, "Unhandled error in {Action}", ControllerContext.ActionDescriptor?.ActionName);
+            return StatusCode(StatusCodes.Status500InternalServerError, "An unexpected error occurred");
         }
     }
 }

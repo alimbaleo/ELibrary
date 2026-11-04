@@ -39,9 +39,9 @@ namespace ELibrary.Gutenberg.Services
 
                 var book = await _client.GetAsync<GoogleBookItem>(url);
 
-                if (book == null || !book.accessInfo.Embeddable || !string.Equals(book.accessInfo?.Viewability, "ALL_PAGES", StringComparison.OrdinalIgnoreCase))
+                if (book == null || book.accessInfo?.Embeddable != true || !string.Equals(book.accessInfo?.Viewability, "ALL_PAGES", StringComparison.OrdinalIgnoreCase))
                 {
-                    return new Response<string>(null, $"Book content not found for book {id}", false);
+                    return Response<string>.NotFound($"Book content not found for book {id}");
                 }
                 string bookHtml = GetBookViewerHtml(book.id, book.volumeInfo.title);
                 //var bookContent = book.accessInfo?.webReaderLink ?? book.volumeInfo?.infoLink;
@@ -50,7 +50,8 @@ namespace ELibrary.Gutenberg.Services
             }
             catch (Exception ex)
             {
-                return new Response<string>(null, $"An error occurred getting book", false);
+                _logger.LogError(ex, "GoogleService[GetBookById] failed for book {Id}", id);
+                return Response<string>.FromProviderException(ex, "Google Books", $"Book content not found for book {id}");
             }
         }
 
@@ -73,7 +74,7 @@ namespace ELibrary.Gutenberg.Services
 
                 if (book?.volumeInfo == null)
                 {
-                    return new Response<BookSummary>(null, $"Book with id {id} not found", false);
+                    return Response<BookSummary>.NotFound($"Book with id {id} not found");
                 }
 
                 var summary = new BookSummary
@@ -90,7 +91,8 @@ namespace ELibrary.Gutenberg.Services
             }
             catch (Exception ex)
             {
-                return new Response<BookSummary>(null, $"An error occurred getting book summary", false);
+                _logger.LogError(ex, "GoogleService[GetBookSummaryById] failed for book {Id}", id);
+                return Response<BookSummary>.FromProviderException(ex, "Google Books", $"Book with id {id} not found");
             }
         }
 
@@ -113,7 +115,7 @@ namespace ELibrary.Gutenberg.Services
 
                 if (string.IsNullOrEmpty(imageUrl))
                 {
-                    return new Response<FileContentResult>(null, $"Image not found for book {id}", false);
+                    return Response<FileContentResult>.NotFound($"Image not found for book {id}");
                 }
 
                 using var client = new HttpClient();
@@ -128,7 +130,8 @@ namespace ELibrary.Gutenberg.Services
             }
             catch (Exception ex)
             {
-                return new Response<FileContentResult>(null, $"An error occurred getting image for book {id}", false);
+                _logger.LogError(ex, "GoogleService[GetImageById] failed for book {Id}", id);
+                return Response<FileContentResult>.FromProviderException(ex, "Google Books", $"Image not found for book {id}");
             }
         }
 
@@ -183,7 +186,7 @@ namespace ELibrary.Gutenberg.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[FATAL ERROR] SearchBooks failed for search: {SearchText}", searchText);
-                return new Response<SearchBookResponse>(null, "An error occurred getting books", false);
+                return Response<SearchBookResponse>.FromProviderException(ex, "Google Books", "No books found");
             }
         }
 
@@ -239,7 +242,7 @@ namespace ELibrary.Gutenberg.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[FATAL ERROR] SearchBooks failed for topic: {Topic}", topic);
-                return new Response<SearchBookResponse>(null, "An error occurred getting books", false);
+                return Response<SearchBookResponse>.FromProviderException(ex, "Google Books", "No books found");
             }
         }
 

@@ -26,61 +26,58 @@ namespace ELibrary.Core.Helpers
                     return true;
                 }
             };
-            _httpClient = new HttpClient(httpClientHandler);
+            _httpClient = new HttpClient(httpClientHandler)
+            {
+                // Fail with a clear timeout instead of hanging for HttpClient's default 100s when a provider is slow.
+                Timeout = TimeSpan.FromSeconds(45)
+            };
 
         }
 
         public async Task<T> GetAsync<T>(string url)
         {
-            try
+            // Exceptions are left to propagate unchanged so callers can see the HTTP status code
+            // (HttpRequestException.StatusCode) or the timeout (TaskCanceledException).
+            var resp = await _httpClient.GetAsync(url);
+            var responseString = await resp.Content.ReadAsStringAsync();
+
+            if (!resp.IsSuccessStatusCode)
+                throw new HttpRequestException(
+                    $"Response status code does not indicate success: {(int)resp.StatusCode} ({resp.ReasonPhrase}). Body: {Truncate(responseString, 500)}",
+                    null,
+                    resp.StatusCode);
+
+            if (typeof(T) == typeof(string))
+                return (T)(object)responseString;
+
+            if (string.IsNullOrWhiteSpace(responseString) || responseString.Trim() == "[]")
+                return default!;
+
+            // Not an array: Direct deserialize to T
+            var token = JToken.Parse(responseString);
+            if (token.Type != JTokenType.Array)
+                return DeserializeObject<T>(responseString);
+
+            // For DOA Books - return format is different
+            // JSON is an array: Check if T is a List<U>
+            var tType = typeof(T);
+            if (tType.IsGenericType && tType.GetGenericTypeDefinition() == typeof(List<>))
             {
-                var resp = await _httpClient.GetAsync(url);
-                var responseString = await resp.Content.ReadAsStringAsync();
+                var elementType = tType.GetGenericArguments()[0];
+                var listType = typeof(List<>).MakeGenericType(elementType);
 
-                if (!resp.IsSuccessStatusCode)
-                    throw new Exception(
-                        $"Response status code does not indicate success: {(int)resp.StatusCode} ({resp.ReasonPhrase}). Body: {responseString}");
-
-                if (string.IsNullOrWhiteSpace(responseString) || responseString.Trim() == "[]")
-                    return default!;
-
-                if (responseString.Contains("DOCTYPE"))
-                    return (T)(object)responseString;
-
-                // Not an array: Direct deserialize to T
-                var token = JToken.Parse(responseString);
-                if (token.Type != JTokenType.Array)
-                    return DeserializeObject<T>(responseString);
-                
-                
-                // For DOA Books - return format is different
-                // JSON is an array: Check if T is a List<U>
-                var tType = typeof(T);
-                if (tType.IsGenericType && tType.GetGenericTypeDefinition() == typeof(List<>))
-                {
-                    var elementType = tType.GetGenericArguments()[0];
-                    var listType = typeof(List<>).MakeGenericType(elementType);
-
-                    // Deserialize array to List<U>, then cast to T
-                    var arrayObj = JsonConvert.DeserializeObject(responseString, listType, GetJsonSettings());
-                    return (T)Convert.ChangeType(arrayObj, tType);
-                }
-                else
-                {
-                    // T isn't a list (e.g., single object or array): Fallback to direct deserialize
-                    return DeserializeObject<T>(responseString);
-                }
+                // Deserialize array to List<U>, then cast to T
+                var arrayObj = JsonConvert.DeserializeObject(responseString, listType, GetJsonSettings());
+                return (T)Convert.ChangeType(arrayObj, tType);
             }
-            catch (JsonSerializationException jsonEx)
-            {
-                throw new Exception(jsonEx.Message);
-            }
-            catch (Exception e)
-            {
-                throw new Exception(e.Message);
-            }
+
+            // T isn't a list (e.g., single object or array): Fallback to direct deserialize
+            return DeserializeObject<T>(responseString);
         }
-        
+
+        private static string Truncate(string value, int maxLength) =>
+            string.IsNullOrEmpty(value) || value.Length <= maxLength ? value : value[..maxLength] + "...";
+
         
         // Helper for consistent settings (handles dates, nulls)
         private static JsonSerializerSettings GetJsonSettings()

@@ -56,13 +56,17 @@ namespace ELibrary.Infrastructure.Services
                     return new Response<string>(null, $"Book with ID {id} not found", false);
                 
                 var book = await GetBookSummaryById(id);
-                return book.Data.viewLink == null
-                    ? new Response<string>(null, $"Book content not found for book {id}", false)
+                if (!book.Success)
+                    return Response<string>.Failed(book);
+
+                return string.IsNullOrEmpty(book.Data.viewLink)
+                    ? Response<string>.NotFound($"Book content not found for book {id}")
                     : new Response<string>(book.Data.viewLink);
             }
             catch (Exception e)
             {
-                return new Response<string>(null, $"An error occurred getting book", false);
+                _logger.LogError(e, "DoaBooksService[GetBookById] failed for book {Id}", id);
+                return Response<string>.FromProviderException(e, "DOAB", $"Book with ID {id} not found");
             }
         }
 
@@ -92,13 +96,11 @@ namespace ELibrary.Infrastructure.Services
                 }
 
                 if (string.IsNullOrEmpty(pdfLink))
-                    return new Response<BookSummary>(null, $"Book with id {id} not found", false);
+                    return Response<BookSummary>.NotFound($"No download link available for book {id}");
 
                 if (pdfLink.Contains("mdpi.com", StringComparison.OrdinalIgnoreCase) || pdfLink.Contains("https://doi.org", StringComparison.OrdinalIgnoreCase) || pdfLink.Contains("dx.doi.org", StringComparison.OrdinalIgnoreCase))
                 {
-                    pdfLink = await GetDownloadPdfLinkAsync(pdfLink);
-                    if (string.IsNullOrEmpty(pdfLink))
-                        return new Response<BookSummary>(null, $"Book with id {id} not found", false);
+                    pdfLink = await ResolvePdfLinkOrFallbackAsync(pdfLink, id);
                 }
                 
                 var summary = new BookSummary
@@ -123,8 +125,8 @@ namespace ELibrary.Infrastructure.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "DoaBooksService[GetBookSummaryById] : Something went wrong");
-                return new Response<BookSummary>(null, $"An error occurred getting book summary", false);
+                _logger.LogError(ex, "DoaBooksService[GetBookSummaryById] failed for book {Id}", id);
+                return Response<BookSummary>.FromProviderException(ex, "DOAB", $"Book with ID {id} not found");
             }
         }
 
@@ -153,8 +155,8 @@ namespace ELibrary.Infrastructure.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "DoaBooksService[GetImageById] : Something went wrong");
-                return new Response<FileContentResult>(null, "Something went wrong.", false);
+                _logger.LogError(ex, "DoaBooksService[GetImageById] failed for image {Id}", id);
+                return Response<FileContentResult>.FromProviderException(ex, "DOAB", $"Image {id} not found");
             }
         }
 
@@ -182,7 +184,7 @@ namespace ELibrary.Infrastructure.Services
                 _logger.LogInformation(
                     $"DoaBooksService[SearchBooks] : About to get book search result with url: {url}");
                 
-                var books = await _client.GetAsync<List<DoaBookResults>>(url);
+                var books = await _client.GetAsync<List<DoaBookResults>>(url) ?? new List<DoaBookResults>();
                 
                 var nextPageUrl = books.Count == limit
                     ? $"{_eLibraryBaseUrl}/books/search?searchText={searchText}&page={currentPage + 1}"
@@ -228,8 +230,8 @@ namespace ELibrary.Infrastructure.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "DoaBooksService[SearchBooks] : Something went wrong");
-                return new Response<SearchBookResponse>(null, "Something went wrong.", false);
+                _logger.LogError(ex, "DoaBooksService[SearchBooks] failed for search: {SearchText}", searchText);
+                return Response<SearchBookResponse>.FromProviderException(ex, "DOAB", "No books found");
             }
         }
 
@@ -259,6 +261,29 @@ namespace ELibrary.Infrastructure.Services
                 </html>
             ";
             return html;
+        }
+
+        /// <summary>
+        /// Tries to turn an mdpi/doi.org landing-page link into a direct PDF link. If that fails
+        /// (scrape finds nothing, or the rewrite service is down), returns the original link so the
+        /// reader still opens the publisher's page instead of the API reporting the book as not found.
+        /// </summary>
+        private async Task<string> ResolvePdfLinkOrFallbackAsync(string pdfLink, string id)
+        {
+            try
+            {
+                var resolved = await GetDownloadPdfLinkAsync(pdfLink);
+                if (!string.IsNullOrEmpty(resolved))
+                    return resolved;
+
+                _logger.LogWarning("DoaBooksService: could not resolve a direct PDF link for book {Id} from {Link}; using the original link", id, pdfLink);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "DoaBooksService: PDF link resolution failed for book {Id} from {Link}; using the original link", id, pdfLink);
+            }
+
+            return pdfLink;
         }
 
         public async Task<string?> GetDownloadPdfLinkAsync(string pdfUrl)

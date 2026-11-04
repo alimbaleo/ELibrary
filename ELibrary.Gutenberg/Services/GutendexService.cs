@@ -42,7 +42,7 @@ namespace ELibrary.Infrastruture.Services
 
                 if (string.IsNullOrEmpty(bookHtml))
                 {
-                    return new Response<string>(null, $"Book content not found for book {id}", false);
+                    return Response<string>.NotFound($"Book content not found for book {id}");
                 }
 
                 bookHtml = RemoveGutenbergBoilerplate(bookHtml);
@@ -52,7 +52,8 @@ namespace ELibrary.Infrastruture.Services
             }
             catch (Exception ex)
             {
-                return new Response<string>(null, $"An error occurred getting book ", false);
+                _logger.LogError(ex, "GutendexService[GetBookById] failed for book {Id}", id);
+                return Response<string>.FromProviderException(ex, "Project Gutenberg", $"Book content not found for book {id}");
             }
         }
 
@@ -66,26 +67,27 @@ namespace ELibrary.Infrastruture.Services
                 var url = gutendexBaseUrl + $"?ids={id}";
                 var book = await _client.GetAsync<GutendexBookResponse>(url);
 
-                if (book.results == null)
+                var result = book?.results?.FirstOrDefault();
+                if (result == null)
                 {
-                    return new Response<BookSummary>(null, $"Book with id {id} not found", false);
+                    return Response<BookSummary>.NotFound($"Book with id {id} not found");
                 }
 
                 var summary = new BookSummary
                 {
-                    Id = book.results.FirstOrDefault().id.ToString(),
-                    Title = book.results.FirstOrDefault().title,
-                    Authors = book.results.FirstOrDefault().authors?.Select(a => a.name).ToList() ?? new List<string>(),
-                    Summary = book.results.FirstOrDefault().summaries?.FirstOrDefault() ?? "No Summary Available",
-                    ImageUrl = eLibraryBaseUrl + $"/Image/{book.results.FirstOrDefault().id}"
+                    Id = result.id.ToString(),
+                    Title = result.title,
+                    Authors = result.authors?.Select(a => a.name).ToList() ?? new List<string>(),
+                    Summary = result.summaries?.FirstOrDefault() ?? "No Summary Available",
+                    ImageUrl = eLibraryBaseUrl + $"/Image/{result.id}"
                 };
 
                 return new Response<BookSummary>(summary, "Book summary retrieved successfully", true);
             }
             catch (Exception ex)
             {
-                // log exception with Serilog
-                return new Response<BookSummary>(null, $"An error occurred getting book summary", false);
+                _logger.LogError(ex, "GutendexService[GetBookSummaryById] failed for book {Id}", id);
+                return Response<BookSummary>.FromProviderException(ex, "Gutendex", $"Book with id {id} not found");
             }
         }
 
@@ -109,7 +111,8 @@ namespace ELibrary.Infrastruture.Services
             }
             catch (Exception ex)
             {
-                return new Response<FileContentResult>(null, $"An error occurred getting image for book {id}", false);
+                _logger.LogError(ex, "GutendexService[GetImageById] failed for book {Id}", id);
+                return Response<FileContentResult>.FromProviderException(ex, "Project Gutenberg", $"Image not found for book {id}");
             }
             
         }
@@ -146,7 +149,7 @@ namespace ELibrary.Infrastruture.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[FATAL ERROR] SearchBooks failed for search: {SearchText}", searchText);
-                return new Response<SearchBookResponse>(null, "An error occurred getting books", false);
+                return Response<SearchBookResponse>.FromProviderException(ex, "Gutendex", "No books found");
             }
             
         }
@@ -183,7 +186,7 @@ namespace ELibrary.Infrastruture.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[FATAL ERROR] SearchBooks failed for topic: {Topic}", topic);
-                return new Response<SearchBookResponse>(null, "An error occurred getting books", false);
+                return Response<SearchBookResponse>.FromProviderException(ex, "Gutendex", "No books found");
             }
 
         }

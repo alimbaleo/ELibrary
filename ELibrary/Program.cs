@@ -1,9 +1,10 @@
-
+﻿
 using ELibrary.Core.Helpers;
 using ELibrary.Core.Interfaces;
 using ELibrary.Core.Services;
 using ELibrary.Filters;
 using ELibrary.Gutenberg.Services;
+using ELibrary.Infrastructure.Doab;
 using ELibrary.Infrastructure.Services;
 using ELibrary.Infrastruture.Services;
 using Microsoft.AspNetCore.Authentication;
@@ -27,6 +28,12 @@ namespace ELibrary
             builder.Services.AddScoped<ILibraryService, GutendexService>();
             builder.Services.AddScoped<ILibraryService, GoogleService>();
             builder.Services.AddScoped<ILibraryService, DoaBooksService>();
+
+            // DOAB: served from a local catalogue (DOAB's REST API is allow-list only), kept in sync in the background.
+            builder.Services.AddSingleton<IDoabCatalogueStore, DoabCatalogueStore>();
+            builder.Services.AddHttpClient<DoabClient>();
+            builder.Services.AddHostedService<DoabCatalogueSyncService>();
+
             builder.Services.AddScoped<LibraryCoordinator>();
 
             builder.Services.AddAuthentication("BasicAuthentication")

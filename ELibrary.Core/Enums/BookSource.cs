@@ -2,6 +2,6 @@
 {
     public enum BookSource
     {
-        Gutenberg, Google, DOA
+        Gutenberg, Google, DOA, OpenLibrary
     }
 }

@@ -1,49 +1,46 @@
 ﻿using AngleSharp.Html.Parser;
-using ELibrary.Core.Constants;
 using ELibrary.Core.Enums;
 using ELibrary.Core.Helpers;
 using ELibrary.Core.Interfaces;
 using ELibrary.Core.Models;
-using ELibrary.Infrastructure.Models;
+using ELibrary.Infrastructure.Doab;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
-using System.Net;
 using System.Text.Json;
 
 namespace ELibrary.Infrastructure.Services
 {
+    /// <summary>
+    /// DOAB (Directory of Open Access Books) provider.
+    /// DOAB's REST API only serves allow-listed addresses, so search and lookups are served from a local
+    /// copy of the catalogue (<see cref="IDoabCatalogueStore"/>) that <see cref="DoabCatalogueSyncService"/>
+    /// harvests from DOAB's public OAI-PMH feed and keeps current.
+    /// </summary>
     public class DoaBooksService : ILibraryService
     {
-        private readonly IApiClient _client;
-        private readonly IConfiguration _config;
-        private readonly ILogger<DoaBooksService> _logger;
-        private readonly IMemoryCache _cache;
+        private const string CatalogueLoadingMessage = "The DOAB catalogue is still loading; try again in a few minutes";
 
-        private readonly string _doaBaseUrl = string.Empty;
-        private readonly string _eLibraryBaseUrl = string.Empty;
-        private readonly string _imageUrl = string.Empty;
-        private readonly string _rewriteBaseUrl = string.Empty;
-        private readonly int _maxResult = 0;
+        private readonly IDoabCatalogueStore _catalogue;
+        private readonly DoabClient _doab;
+        private readonly ILogger<DoaBooksService> _logger;
+
+        private readonly string _eLibraryBaseUrl;
+        private readonly string _rewriteBaseUrl;
+        private readonly int _maxResult;
 
         public BookSource BOOK_SOURCE => BookSource.DOA;
 
 
-        public DoaBooksService(IApiClient client, IConfiguration config, ILogger<DoaBooksService> logger, IMemoryCache cache)
+        public DoaBooksService(IDoabCatalogueStore catalogue, DoabClient doab, IConfiguration config, ILogger<DoaBooksService> logger)
         {
-            _config = config;
-            _client = client;
+            _catalogue = catalogue;
+            _doab = doab;
             _logger = logger;
-             _cache = cache;
 
-            _doaBaseUrl = _config.GetValue<string>("DoaBooks:BaseUrl") ?? string.Empty;
-            _imageUrl = _config.GetValue<string>("DoaBooks:ImageUrl") ?? string.Empty;
-            _maxResult = _config.GetValue<int>("DoaBooks:MaxResults", 10);
-            _eLibraryBaseUrl = _config.GetValue<string>("ElibraryBaseUrl") ?? string.Empty;
-            _rewriteBaseUrl = _config.GetValue<string>("RewriteBaseUrl") ?? string.Empty;
+            _maxResult = config.GetValue<int>("DoaBooks:MaxResults", 10);
+            _eLibraryBaseUrl = config.GetValue<string>("ElibraryBaseUrl") ?? string.Empty;
+            _rewriteBaseUrl = config.GetValue<string>("RewriteBaseUrl") ?? string.Empty;
         }
 
 
@@ -52,9 +49,6 @@ namespace ELibrary.Infrastructure.Services
         {
             try
             {
-                if(string.IsNullOrEmpty(id))
-                    return new Response<string>(null, $"Book with ID {id} not found", false);
-                
                 var book = await GetBookSummaryById(id);
                 if (!book.Success)
                     return Response<string>.Failed(book);
@@ -76,25 +70,12 @@ namespace ELibrary.Infrastructure.Services
         {
             try
             {
-                if(string.IsNullOrEmpty(id))
-                    return new Response<BookSummary>(null, $"Book with ID {id} not found", false);
-                
-                _logger.LogInformation($"DoaBooksService[GetBookSummaryById] : Getting book content for book {id}");
-                
-                var url = $"{_doaBaseUrl}/rest/items/{id}?expand=all";
-                var book = await _client.GetAsync<DoaBookResponseModel>(url);
+                var lookup = FindInCatalogue(id);
+                if (!lookup.Success)
+                    return Response<BookSummary>.Failed(lookup);
 
-                _logger.LogInformation(
-                    $"DoaBooksService[GetBookSummaryById] : Response from api : {JsonConvert.SerializeObject(book)}");
-                
-                var pdfLink = string.Empty;
-                
-                foreach (var bit in book.Bitstreams.Where(bit => bit.Metadata.Any(x => x.Key == Constants.DownloadKey)))
-                {
-                    pdfLink = bit.Metadata.Where(x => x.Key == Constants.DownloadKey)?.FirstOrDefault()?.Value.ToString();
-                    break;
-                }
-
+                var book = lookup.Data;
+                var pdfLink = book.DownloadUrl;
                 if (string.IsNullOrEmpty(pdfLink))
                     return Response<BookSummary>.NotFound($"No download link available for book {id}");
 
@@ -102,25 +83,17 @@ namespace ELibrary.Infrastructure.Services
                 {
                     pdfLink = await ResolvePdfLinkOrFallbackAsync(pdfLink, id);
                 }
-                
+
                 var summary = new BookSummary
                 {
-                    Id = id,
-                    Title = book.Name ?? "Unknown Title",
-                    Authors = book.Metadata
-                        .Where(m => m.Key == Constants.AuthorKey || (m.Key == Constants.EditorKey && !book.Metadata.Any(x => x.Key == Constants.AuthorKey)))
-                        .Where(m => m.Key == Constants.AuthorKey || m.Key == Constants.EditorKey)
-                        .Select(m => m.Value?.ToString() ?? string.Empty)
-                        .Where(s => !string.IsNullOrEmpty(s))
-                        .ToList(),
-                    Summary = Util.TruncateText(book.Metadata.FirstOrDefault(x => x.Key == Constants.DescriptionKey)?.Value?.ToString(), 200) ?? "No Summary Available",
-                    ImageUrl = _eLibraryBaseUrl + $"/Image/{book.Bitstreams.FirstOrDefault(x => x.BundleName == Constants.ThumbnailBundleName)?.Uuid}",
+                    Id = book.Uuid,
+                    Title = book.Title,
+                    Authors = book.Authors.ToList(),
+                    Summary = SummaryText(book),
+                    ImageUrl = _eLibraryBaseUrl + $"/Image/{book.Uuid}",
                     viewLink = ViewBook(pdfLink),
                 };
 
-                _logger.LogInformation(
-                    $"DoaBooksService[GetBookSummaryById] : Response from api : {JsonConvert.SerializeObject(summary)}");
-                
                 return new Response<BookSummary>(summary, "Book summary retrieved successfully", true);
             }
             catch (Exception ex)
@@ -136,111 +109,114 @@ namespace ELibrary.Infrastructure.Services
         {
             try
             {
-                if(string.IsNullOrEmpty(id))
-                    return new Response<FileContentResult>(null, $"Book with ID {id} not found", false);
-                
-                _logger.LogInformation(
-                    $"DoaBooksService[GetImageById] : Getting image content for book {id}");
-                
-                var imageUrl = $"{_imageUrl}/{id}/retrieve";
-                using var client = new HttpClient();
-                var bytes = await client.GetByteArrayAsync(imageUrl);
+                var lookup = FindInCatalogue(id);
+                if (!lookup.Success)
+                    return Response<FileContentResult>.Failed(lookup);
 
-                var fileContent = new FileContentResult(bytes, "image/jpeg")
+                var book = lookup.Data;
+                var thumbnailUrl = book.ThumbnailUrl;
+
+                // A few harvested records come without a thumbnail URL; look it up once via OAI-PMH and cache it.
+                if (string.IsNullOrEmpty(thumbnailUrl) && !string.IsNullOrEmpty(book.Handle))
                 {
-                    FileDownloadName = $"book_{id}.jpg"
+                    thumbnailUrl = (await _doab.GetRecordAsync(book.Handle, CancellationToken.None))?.ThumbnailUrl;
+                    if (!string.IsNullOrEmpty(thumbnailUrl))
+                        _catalogue.SetThumbnailUrl(book.Uuid, thumbnailUrl);
+                }
+
+                if (string.IsNullOrEmpty(thumbnailUrl))
+                    return Response<FileContentResult>.NotFound($"Image not found for book {id}");
+
+                var (bytes, contentType) = await _doab.DownloadAsync(thumbnailUrl, CancellationToken.None);
+                var fileContent = new FileContentResult(bytes, contentType)
+                {
+                    FileDownloadName = $"book_{book.Uuid}{(contentType.Contains("png") ? ".png" : ".jpg")}"
                 };
 
                 return new Response<FileContentResult>(fileContent, "Image retrieved successfully", true);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "DoaBooksService[GetImageById] failed for image {Id}", id);
-                return Response<FileContentResult>.FromProviderException(ex, "DOAB", $"Image {id} not found");
+                _logger.LogError(ex, "DoaBooksService[GetImageById] failed for book {Id}", id);
+                return Response<FileContentResult>.FromProviderException(ex, "DOAB", $"Image not found for book {id}");
             }
         }
 
 
 
+        public Task<Response<SearchBookResponse>> SearchBooks(int? page, string searchText) =>
+            Search(page, searchText, DoabSearchField.TitleOrAuthor, "Search", "SearchText");
 
-        public async Task<Response<SearchBookResponse>> SearchBooks(int? page, string searchText)
+
+
+        public Task<Response<SearchBookResponse>> SearchBooksByTopic(int? page, string topic) =>
+            Search(page, topic, DoabSearchField.Subject, "SearchTopic", "Topic");
+
+
+
+        private Task<Response<SearchBookResponse>> Search(int? page, string text, DoabSearchField field, string action, string textParam)
         {
             try
             {
-                if(string.IsNullOrEmpty(searchText))
-                    return new Response<SearchBookResponse>(null, $"Book search text not found", false);
-                
-                var currentPage = page.GetValueOrDefault(1);
-                if (currentPage < 1) currentPage = 1;
+                if (string.IsNullOrWhiteSpace(text))
+                    return Task.FromResult(new Response<SearchBookResponse>(null!, "Book search text not found", false));
 
-                var limit = _maxResult;
-                var offset = (currentPage - 1) * limit;
-                
-                var split = searchText.Split(' ');
-                var query = string.Join("+", split);
-                
-                var url = $"{_doaBaseUrl}/rest/search?query=dc.title:{query}&limit={limit}&offset={offset}&expand=metadata,bitstreams";
+                var currentPage = Math.Max(page.GetValueOrDefault(1), 1);
+                var (books, total) = _catalogue.Search(text, field, _maxResult, (currentPage - 1) * _maxResult);
 
-                _logger.LogInformation(
-                    $"DoaBooksService[SearchBooks] : About to get book search result with url: {url}");
-                
-                var books = await _client.GetAsync<List<DoaBookResults>>(url) ?? new List<DoaBookResults>();
-                
-                var nextPageUrl = books.Count == limit
-                    ? $"{_eLibraryBaseUrl}/books/search?searchText={searchText}&page={currentPage + 1}"
-                    : null;
+                if (total == 0 && !_catalogue.IsReady)
+                    _logger.LogWarning("DOAB search for {Text} returned nothing because the catalogue is still loading", text);
 
-                var previousPageUrl = currentPage > 1
-                    ? $"{_eLibraryBaseUrl}/books/search?searchText={searchText}&page={currentPage - 1}"
-                    : null;
-                
-                
-                var response = new Response<SearchBookResponse>(
-                    new SearchBookResponse
+                var encoded = Uri.EscapeDataString(text);
+                var response = new SearchBookResponse
+                {
+                    Count = total,
+                    NextPageUrl = currentPage * _maxResult < total
+                        ? $"{_eLibraryBaseUrl}/{action}?Page={currentPage + 1}&{textParam}={encoded}"
+                        : null,
+                    PreviousPageUrl = currentPage > 1
+                        ? $"{_eLibraryBaseUrl}/{action}?Page={currentPage - 1}&{textParam}={encoded}"
+                        : null,
+                    Data = books.Select(b => new Data
                     {
-                        Count = books.Count,
-                        NextPageUrl = nextPageUrl,
-                        PreviousPageUrl = previousPageUrl,
-                        Data = books.Select(b => new Data
-                        {
-                            Id = b.Uuid,
-                            Title = b.Name,
-                            Authors = b.Metadata
-                                .Where(m => m.Key == Constants.AuthorKey || (m.Key == Constants.EditorKey &&
-                                                                             !b.Metadata.Any(x =>
-                                                                                 x.Key == Constants.AuthorKey)))
-                                .Where(m => m.Key == Constants.AuthorKey || m.Key == Constants.EditorKey)
-                                .Select(m => m.Value?.ToString() ?? string.Empty)
-                                .Where(s => !string.IsNullOrEmpty(s))
-                                .ToList(),
+                        Id = b.Uuid,
+                        Title = b.Title,
+                        Authors = b.Authors.ToList(),
+                        Summary = SummaryText(b),
+                        ImageUrl = _eLibraryBaseUrl + $"/Image/{b.Uuid}",
+                        Source = BOOK_SOURCE,
+                    }).ToList()
+                };
 
-                            Summary = b.Metadata.FirstOrDefault(x => x.Key == Constants.DescriptionKey)?.Value
-                                ?.ToString() ?? string.Empty,
-                            ImageUrl = _eLibraryBaseUrl + $"/Image/{b.Bitstreams.FirstOrDefault(x => x.BundleName == Constants.ThumbnailBundleName)?.Uuid}",
-                            Source = BOOK_SOURCE,
-                        }).ToList() ?? new List<Data>()
-                    },
-                    "Books retrieved successfully",
-                    true
-                );
-
-                _logger.LogInformation(
-                    $"DoaBooksService[SearchBooks] : Books retrieved successfully with search text: {searchText} and count {response.Data.Count}");
-                return response;
+                return Task.FromResult(new Response<SearchBookResponse>(response, "Books retrieved successfully", true));
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "DoaBooksService[SearchBooks] failed for search: {SearchText}", searchText);
-                return Response<SearchBookResponse>.FromProviderException(ex, "DOAB", "No books found");
+                _logger.LogError(ex, "DoaBooksService[Search] failed for {Field} search: {Text}", field, text);
+                return Task.FromResult(new Response<SearchBookResponse>(null!, "DOAB search failed", false, ErrorType.Upstream));
             }
         }
 
 
 
-        public async Task<Response<SearchBookResponse>> SearchBooksByTopic(int? page, string topic)
+        private Response<DoabCatalogueEntry> FindInCatalogue(string id)
         {
-            return await SearchBooks(page, topic);
+            if (string.IsNullOrWhiteSpace(id) || !Guid.TryParse(id, out _))
+                return Response<DoabCatalogueEntry>.NotFound($"Book with ID {id} not found");
+
+            var book = _catalogue.Get(id);
+            if (book != null)
+                return new Response<DoabCatalogueEntry>(book);
+
+            return _catalogue.IsReady
+                ? Response<DoabCatalogueEntry>.NotFound($"Book with ID {id} not found")
+                : Response<DoabCatalogueEntry>.UpstreamError(CatalogueLoadingMessage);
         }
+
+
+
+        private static string SummaryText(DoabCatalogueEntry book) =>
+            string.IsNullOrWhiteSpace(book.Abstract) ? "No Summary Available" : Util.TruncateText(book.Abstract, 200);
 
 
 

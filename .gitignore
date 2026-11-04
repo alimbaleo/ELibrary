@@ -361,3 +361,6 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Local DOAB catalogue (SQLite), rebuilt automatically at startup
+**/data/doab-catalogue.db*

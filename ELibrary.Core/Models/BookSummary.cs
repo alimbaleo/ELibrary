@@ -4,14 +4,13 @@ namespace ELibrary.Core.Models
 {
     public class BookSummary
     {
-        public string Id { get; set; }
-        public string Title { get; set; }
-        public List<string> Authors { get; set; }
-        public string Summary { get; set; }
-        public string ImageUrl { get; set; }
+        public string Id { get; set; } = string.Empty;
+        public string Title { get; set; } = string.Empty;
+        public List<string> Authors { get; set; } = new();
+        public string Summary { get; set; } = string.Empty;
+        public string ImageUrl { get; set; } = string.Empty;
         public BookSource Source { get; set; }
         public bool IsPartial { get; set; }
-        
-        public string? viewLink { get; set; } = String.Empty;
+        public string? ViewLink { get; set; } = string.Empty;
     }
 }

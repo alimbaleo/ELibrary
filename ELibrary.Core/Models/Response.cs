@@ -25,17 +25,18 @@ namespace ELibrary.Core.Models
             ErrorType = success ? ErrorType.None : (errorType == ErrorType.None ? ErrorType.BadRequest : errorType);
         }
 
+        public static Response<T> Ok(T data, string message = "") => new(data, message, true);
+
+        public static Response<T> Fail(string message) => new(default!, message, false, ErrorType.BadRequest);
+
         public static Response<T> NotFound(string message) => new(default!, message, false, ErrorType.NotFound);
 
         public static Response<T> UpstreamError(string message) => new(default!, message, false, ErrorType.Upstream);
 
         public static Response<T> Failed<TOther>(Response<TOther> other) => new(default!, other.Message, false, other.ErrorType);
 
-        /// <summary>
-        /// Turns an exception from a call to a book provider into a failure response that says what actually
-        /// went wrong (provider down, blocked, timed out) instead of a generic "not found".
-        /// Upstream response bodies are not included; callers should log the exception for details.
-        /// </summary>
+        // Says what actually went wrong with a provider (down, blocked, timed out) instead of a generic
+        // "not found". Upstream bodies are not included; the caller logs the exception for details.
         public static Response<T> FromProviderException(Exception ex, string provider, string notFoundMessage)
         {
             return ex switch

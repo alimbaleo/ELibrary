@@ -6,7 +6,7 @@ namespace ELibrary.Core.Interfaces
 {
     public interface ILibraryService
     {
-        BookSource BOOK_SOURCE { get; }
+        BookSource Source { get; }
         Task<Response<SearchBookResponse>> SearchBooks(int? page, string searchText);
         Task<Response<SearchBookResponse>> SearchBooksByTopic(int? page, string topic);
         Task<Response<BookSummary>> GetBookSummaryById(string id);

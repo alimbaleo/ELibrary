@@ -107,8 +107,10 @@ namespace ELibrary.Infrastructure.Services
         public override Task<Response<SearchBookResponse>> SearchBooks(int? page, string searchText)
             => Search(page, searchText, searchText, SearchRoute, SearchParameter);
 
+        // Google returns nothing for a "subject:" query combined with filter=ebooks, so topics are
+        // searched as plain terms; the full-view filter still applies.
         public override Task<Response<SearchBookResponse>> SearchBooksByTopic(int? page, string topic)
-            => Search(page, topic, $"subject:{topic}", TopicRoute, TopicParameter);
+            => Search(page, topic, topic, TopicRoute, TopicParameter);
 
         private async Task<Response<SearchBookResponse>> Search(int? page, string term, string query, string route, string parameter)
         {

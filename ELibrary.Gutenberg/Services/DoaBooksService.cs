@@ -81,7 +81,9 @@ namespace ELibrary.Infrastructure.Services
                     Summary = SummaryOf(book),
                     ImageUrl = ImageUrlFor(book.Uuid),
                     Source = Source,
-                    ViewLink = Util.IframeViewerHtml(pdfLink, book.Title)
+                    ViewLink = OpensInNewTab(pdfLink)
+                        ? Util.NewTabViewerHtml(pdfLink, book.Title)
+                        : Util.IframeViewerHtml(pdfLink, book.Title)
                 };
 
                 Logger.LogInformation("DOAB summary for {Id} retrieved: '{Title}'", id, summary.Title);
@@ -218,6 +220,15 @@ namespace ELibrary.Infrastructure.Services
 
         private static string SummaryOf(DoabCatalogueEntry book)
             => string.IsNullOrWhiteSpace(book.Abstract) ? NoSummary : Util.TruncateText(book.Abstract, SummaryLength);
+
+        private bool OpensInNewTab(string link)
+        {
+            if (!Uri.TryCreate(link, UriKind.Absolute, out var uri))
+                return false;
+            return _settings.NewTabHosts.Any(h =>
+                uri.Host.Equals(h, StringComparison.OrdinalIgnoreCase) ||
+                uri.Host.EndsWith("." + h, StringComparison.OrdinalIgnoreCase));
+        }
 
         private static bool NeedsResolving(string link)
             => link.Contains("mdpi.com", StringComparison.OrdinalIgnoreCase)

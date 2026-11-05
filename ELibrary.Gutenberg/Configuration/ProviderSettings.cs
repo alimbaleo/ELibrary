@@ -41,5 +41,9 @@ namespace ELibrary.Infrastructure.Configuration
 
         // How long a "no cover found" result is remembered before looking again.
         public int CoverRecheckDays { get; set; } = 7;
+
+        // Hosts (and their subdomains) whose PDFs sit behind a browser check (Anubis) that can't
+        // complete inside the reader's frame; their books open in a new tab instead.
+        public string[] NewTabHosts { get; set; } = { "oapen.org", "doabooks.org" };
     }
 }

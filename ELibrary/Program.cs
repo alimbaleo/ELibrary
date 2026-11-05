@@ -29,7 +29,7 @@ namespace ELibrary
 
             builder.Services.AddHttpClient<IApiClient, ApiClient>(client =>
             {
-                client.Timeout = TimeSpan.FromSeconds(30);
+                client.Timeout = TimeSpan.FromSeconds(120);
                 client.DefaultRequestHeaders.UserAgent.ParseAdd("ELibrary/1.0");
             });
 

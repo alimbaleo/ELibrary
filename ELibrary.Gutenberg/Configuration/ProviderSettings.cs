@@ -34,5 +34,12 @@ namespace ELibrary.Infrastructure.Configuration
 
         public string RewriteBaseUrl { get; set; } = string.Empty;
         public int MaxResults { get; set; } = 10;
+
+        // DOAB's thumbnails only load in browsers (Anubis bot challenge); turn this on if DOAB
+        // allow-lists the server, to prefer them over covers looked up by ISBN.
+        public bool UseDoabThumbnails { get; set; }
+
+        // How long a "no cover found" result is remembered before looking again.
+        public int CoverRecheckDays { get; set; } = 7;
     }
 }

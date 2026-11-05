@@ -53,6 +53,17 @@ namespace ELibrary.Infrastructure.Doab
             return (bytes, response.Content.Headers.ContentType?.MediaType ?? "image/jpeg");
         }
 
+        /// <summary>Like <see cref="DownloadAsync"/>, but returns null when the image doesn't exist (404).</summary>
+        public async Task<(byte[] Bytes, string ContentType)?> TryDownloadAsync(string url, CancellationToken ct)
+        {
+            using var response = await _http.GetAsync(url, ct);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                return null;
+            response.EnsureSuccessStatusCode();
+            var bytes = await response.Content.ReadAsByteArrayAsync(ct);
+            return (bytes, response.Content.Headers.ContentType?.MediaType ?? "image/jpeg");
+        }
+
         private async Task<string> GetStringAsync(string url, CancellationToken ct)
         {
             using var response = await _http.GetAsync(url, ct);

@@ -22,6 +22,7 @@ namespace ELibrary.Infrastructure.Services
 
         private readonly IDoabCatalogueStore _catalogue;
         private readonly DoabClient _doab;
+        private readonly DoabCoverFinder _covers;
         private readonly DoaBooksSettings _settings;
 
         public override BookSource Source => BookSource.DOA;
@@ -29,6 +30,7 @@ namespace ELibrary.Infrastructure.Services
         public DoaBooksService(
             IDoabCatalogueStore catalogue,
             DoabClient doab,
+            DoabCoverFinder covers,
             IApiClient client,
             IOptions<DoaBooksSettings> settings,
             IOptions<ELibrarySettings> apiSettings,
@@ -37,6 +39,7 @@ namespace ELibrary.Infrastructure.Services
         {
             _catalogue = catalogue;
             _doab = doab;
+            _covers = covers;
             _settings = settings.Value;
         }
 
@@ -100,24 +103,12 @@ namespace ELibrary.Infrastructure.Services
                     return Response<FileContentResult>.Failed(lookup);
 
                 var book = lookup.Data;
-                var thumbnailUrl = book.ThumbnailUrl;
+                var coverUrl = await FindCoverUrl(book);
+                if (string.IsNullOrEmpty(coverUrl))
+                    return Response<FileContentResult>.NotFound($"No cover available for book {id}");
 
-                // A few harvested records lack a thumbnail URL; fetch it once over OAI-PMH and remember it
-                if (string.IsNullOrEmpty(thumbnailUrl) && !string.IsNullOrEmpty(book.Handle))
-                {
-                    thumbnailUrl = (await _doab.GetRecordAsync(book.Handle, CancellationToken.None))?.ThumbnailUrl;
-                    if (!string.IsNullOrEmpty(thumbnailUrl))
-                        _catalogue.SetThumbnailUrl(book.Uuid, thumbnailUrl);
-                }
-
-                if (string.IsNullOrEmpty(thumbnailUrl))
-                {
-                    Logger.LogWarning("DOAB book {Id} has no thumbnail", id);
-                    return Response<FileContentResult>.NotFound($"Image not found for book {id}");
-                }
-
-                var (bytes, contentType) = await _doab.DownloadAsync(thumbnailUrl, CancellationToken.None);
-                Logger.LogInformation("DOAB image for {Id} downloaded ({Bytes} bytes, {ContentType})", id, bytes.Length, contentType);
+                var (bytes, contentType) = await _doab.DownloadAsync(coverUrl, CancellationToken.None);
+                Logger.LogInformation("DOAB cover for {Id} downloaded from {Host} ({Bytes} bytes)", id, new Uri(coverUrl).Host, bytes.Length);
 
                 var extension = contentType.Contains("png", StringComparison.OrdinalIgnoreCase) ? "png" : "jpg";
                 var file = new FileContentResult(bytes, contentType) { FileDownloadName = $"book_{book.Uuid}.{extension}" };
@@ -166,6 +157,37 @@ namespace ELibrary.Infrastructure.Services
                 Logger.LogError(ex, "DOAB {Field} search failed for '{Term}' page {Page}", field, term, currentPage);
                 return Task.FromResult(Response<SearchBookResponse>.UpstreamError("DOAB search failed"));
             }
+        }
+
+        // DOAB's own thumbnails sit behind a browser-only bot challenge (Anubis), so by default the cover
+        // is looked up by ISBN on Google Books / Open Library. The result, including "none found", is
+        // stored in the catalogue so each book is looked up once (misses are retried after a few days).
+        private async Task<string?> FindCoverUrl(DoabCatalogueEntry book)
+        {
+            if (_settings.UseDoabThumbnails && !string.IsNullOrEmpty(book.ThumbnailUrl))
+                return book.ThumbnailUrl;
+
+            if (!string.IsNullOrEmpty(book.CoverUrl))
+                return book.CoverUrl;
+
+            if (book.CoverCheckedAt is { } checkedAt && checkedAt > DateTimeOffset.UtcNow.AddDays(-_settings.CoverRecheckDays))
+                return null;
+
+            var isbns = book.Isbns;
+            if (isbns.Count == 0 && !string.IsNullOrEmpty(book.Handle))
+            {
+                // Catalogues harvested before ISBNs were stored: fetch this record once over OAI-PMH.
+                isbns = (await _doab.GetRecordAsync(book.Handle, CancellationToken.None))?.Isbns ?? Array.Empty<string>();
+                if (isbns.Count > 0)
+                    _catalogue.SetIsbns(book.Uuid, isbns);
+            }
+
+            var coverUrl = isbns.Count > 0 ? await _covers.FindCoverUrlAsync(isbns, CancellationToken.None) : null;
+            _catalogue.SetCover(book.Uuid, coverUrl, DateTimeOffset.UtcNow);
+
+            if (coverUrl == null)
+                Logger.LogInformation("DOAB book {Id}: no cover found ({IsbnCount} ISBNs tried)", book.Uuid, isbns.Count);
+            return coverUrl;
         }
 
         private Response<DoabCatalogueEntry> FindInCatalogue(string id)

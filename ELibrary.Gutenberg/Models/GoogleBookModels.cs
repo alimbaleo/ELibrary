@@ -39,6 +39,18 @@ namespace ELibrary.Infrastructure.Models
 
         [JsonProperty("imageLinks")]
         public GoogleImageLinks? ImageLinks { get; set; }
+
+        [JsonProperty("industryIdentifiers")]
+        public List<GoogleIndustryIdentifier>? IndustryIdentifiers { get; set; }
+    }
+
+    public class GoogleIndustryIdentifier
+    {
+        [JsonProperty("type")]
+        public string? Type { get; set; }
+
+        [JsonProperty("identifier")]
+        public string? Identifier { get; set; }
     }
 
     public class GoogleImageLinks

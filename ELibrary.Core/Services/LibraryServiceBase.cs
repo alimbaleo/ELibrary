@@ -57,7 +57,7 @@ namespace ELibrary.Core.Services
             catch (Exception ex)
             {
                 Logger.LogError(ex, "{Source} image for {Id} could not be downloaded from {Url}", Source, id, url);
-                return Response<FileContentResult>.Fail($"An error occurred getting image for book {id}");
+                return Response<FileContentResult>.FromProviderException(ex, Source.ToString(), $"Image not found for book {id}");
             }
         }
     }

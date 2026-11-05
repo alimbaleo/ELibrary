@@ -27,12 +27,11 @@ namespace ELibrary.Infrastructure.Configuration
         public int MaxResults { get; set; } = 10;
     }
 
+    // Harvest settings (OaiUrl, CatalogueDbPath, Sync*) under the same section are read by the Doab classes.
     public class DoaBooksSettings
     {
         public const string Section = "DoaBooks";
 
-        public string BaseUrl { get; set; } = "https://directory.doabooks.org";
-        public string ImageUrl { get; set; } = "https://directory.doabooks.org/rest/bitstreams";
         public string RewriteBaseUrl { get; set; } = string.Empty;
         public int MaxResults { get; set; } = 10;
     }

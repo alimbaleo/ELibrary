@@ -14,6 +14,7 @@ namespace ELibrary.Infrastructure.Services
 {
     public class GutenbergService : LibraryServiceBase
     {
+        private const string ProviderName = "Project Gutenberg";
         private const int OpdsPageSize = 25;
         private const string BoilerplateStart = "<section class=\"pg-boilerplate pgheader\"";
         private const string BoilerplateEnd = "</section>";
@@ -43,7 +44,7 @@ namespace ELibrary.Infrastructure.Services
                 if (string.IsNullOrWhiteSpace(html))
                 {
                     Logger.LogWarning("Gutenberg book {Id} returned no content", id);
-                    return Response<string>.Fail($"Book content not found for book {id}");
+                    return Response<string>.NotFound($"Book content not found for book {id}");
                 }
 
                 html = RemoveBoilerplate(html);
@@ -53,7 +54,7 @@ namespace ELibrary.Infrastructure.Services
             catch (Exception ex)
             {
                 Logger.LogError(ex, "Gutenberg book {Id} could not be retrieved", id);
-                return Response<string>.Fail("An error occurred getting book");
+                return Response<string>.FromProviderException(ex, ProviderName, $"Book content not found for book {id}");
             }
         }
 
@@ -66,7 +67,7 @@ namespace ELibrary.Infrastructure.Services
                 if (entry == null)
                 {
                     Logger.LogWarning("Gutenberg book {Id} has no OPDS entry", id);
-                    return Response<BookSummary>.Fail($"Book with id {id} not found");
+                    return Response<BookSummary>.NotFound($"Book with id {id} not found");
                 }
 
                 var summary = new BookSummary
@@ -89,7 +90,7 @@ namespace ELibrary.Infrastructure.Services
             catch (Exception ex)
             {
                 Logger.LogError(ex, "Gutenberg summary for {Id} could not be retrieved", id);
-                return Response<BookSummary>.Fail("An error occurred getting book summary");
+                return Response<BookSummary>.FromProviderException(ex, ProviderName, $"Book with id {id} not found");
             }
         }
 
@@ -138,7 +139,7 @@ namespace ELibrary.Infrastructure.Services
             catch (Exception ex)
             {
                 Logger.LogError(ex, "Gutenberg search failed for '{Term}' page {Page}", term, currentPage);
-                return Response<SearchBookResponse>.Fail("An error occurred getting books");
+                return Response<SearchBookResponse>.FromProviderException(ex, ProviderName, "No books found");
             }
         }
 

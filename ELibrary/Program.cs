@@ -4,6 +4,7 @@ using ELibrary.Core.Interfaces;
 using ELibrary.Core.Services;
 using ELibrary.Filters;
 using ELibrary.Infrastructure.Configuration;
+using ELibrary.Infrastructure.Doab;
 using ELibrary.Infrastructure.Services;
 using Microsoft.AspNetCore.Authentication;
 
@@ -35,8 +36,14 @@ namespace ELibrary
             builder.Services.AddScoped<ILibraryService, GutenbergService>();
             builder.Services.AddScoped<ILibraryService, GoogleService>();
             builder.Services.AddScoped<ILibraryService, OpenLibraryService>();
-            // DOA disabled: directory.doabooks.org returns 403 "You address is not allowed to access this API"
-            // builder.Services.AddScoped<ILibraryService, DoaBooksService>();
+            builder.Services.AddScoped<ILibraryService, DoaBooksService>();
+
+            // DOAB's REST API is allow-list only, so its catalogue is harvested from the public
+            // OAI-PMH feed into a local SQLite store and kept current in the background.
+            builder.Services.AddSingleton<IDoabCatalogueStore, DoabCatalogueStore>();
+            builder.Services.AddHttpClient<DoabClient>();
+            builder.Services.AddHostedService<DoabCatalogueSyncService>();
+
             builder.Services.AddScoped<LibraryCoordinator>();
 
             builder.Services.AddAuthentication(BasicAuthenticationHandler.SchemeName)

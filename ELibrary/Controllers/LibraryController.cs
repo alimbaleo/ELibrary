@@ -59,9 +59,9 @@ namespace ELibrary.Controllers
                 var response = await action();
                 if (!response.Success)
                 {
-                    _logger.LogWarning("{Operation} failed in {ElapsedMs}ms: {Message} {@Context}",
-                        operation, stopwatch.ElapsedMilliseconds, response.Message, context);
-                    return BadRequest(response.Message);
+                    _logger.LogWarning("{Operation} failed ({ErrorType}) in {ElapsedMs}ms: {Message} {@Context}",
+                        operation, response.ErrorType, stopwatch.ElapsedMilliseconds, response.Message, context);
+                    return Failure(response);
                 }
 
                 _logger.LogInformation("{Operation} completed in {ElapsedMs}ms {@Context}", operation, stopwatch.ElapsedMilliseconds, context);
@@ -70,8 +70,16 @@ namespace ELibrary.Controllers
             catch (Exception ex)
             {
                 _logger.LogError(ex, "{Operation} threw after {ElapsedMs}ms {@Context}", operation, stopwatch.ElapsedMilliseconds, context);
-                return BadRequest(ex.Message);
+                return StatusCode(StatusCodes.Status500InternalServerError, "An unexpected error occurred");
             }
         }
+
+        // 404 when the book doesn't exist, 502 when a provider is down/blocked/timed out, 400 otherwise
+        private IActionResult Failure<T>(Response<T> response) => response.ErrorType switch
+        {
+            ErrorType.NotFound => NotFound(response.Message),
+            ErrorType.Upstream => StatusCode(StatusCodes.Status502BadGateway, response.Message),
+            _ => BadRequest(response.Message)
+        };
     }
 }

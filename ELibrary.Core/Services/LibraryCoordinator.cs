@@ -29,6 +29,7 @@ namespace ELibrary.Core.Services
 
         public async Task<Response<BookSummary>> GetBookSummaryById(BookSource source, string id)
         {
+            source = ResolveSource(source, id);
             var provider = FindProvider(source);
             if (provider == null) return Response<BookSummary>.Fail(SourceUnavailable);
 
@@ -39,7 +40,7 @@ namespace ELibrary.Core.Services
 
         public async Task<Response<string>> GetBookById(BookSource source, string id)
         {
-            var provider = FindProvider(source);
+            var provider = FindProvider(ResolveSource(source, id));
             return provider == null
                 ? Response<string>.Fail(SourceUnavailable)
                 : await provider.GetBookById(id);
@@ -47,10 +48,27 @@ namespace ELibrary.Core.Services
 
         public async Task<Response<FileContentResult>> GetImageById(BookSource source, string id)
         {
-            var provider = FindProvider(source);
+            var provider = FindProvider(ResolveSource(source, id));
             return provider == null
                 ? Response<FileContentResult>.Fail(SourceUnavailable)
                 : await provider.GetImageById(id);
+        }
+
+        // Clients sometimes send the wrong source (a Google id with source=DOA, say), which routes the
+        // lookup to the wrong provider and reports the book missing. When the id cannot belong to the
+        // requested source but clearly matches another, use that one.
+        private BookSource ResolveSource(BookSource requested, string id)
+        {
+            if (string.IsNullOrWhiteSpace(id) || BookIdFormat.CouldBelongTo(requested, id.Trim()))
+                return requested;
+
+            var detected = BookIdFormat.DetectSource(id);
+            if (detected == null || detected == requested)
+                return requested;
+
+            _logger.LogWarning("Book {Id} requested with source {Requested} but its id format belongs to {Detected}; routing there",
+                id, requested, detected);
+            return detected.Value;
         }
 
         private ILibraryService? FindProvider(BookSource source)
@@ -93,7 +111,7 @@ namespace ELibrary.Core.Services
             if (successful.Count == 0)
             {
                 _logger.LogError("All {ProviderCount} sources failed for {Kind} '{Term}'", _providers.Length, kind, term);
-                return Response<SearchBookResponse>.Fail(string.Join(", ", failures.Where(m => !string.IsNullOrEmpty(m))));
+                return Response<SearchBookResponse>.UpstreamError(string.Join(", ", failures.Where(m => !string.IsNullOrEmpty(m))));
             }
 
             var books = RemoveDuplicates(successful.SelectMany(r => r.Data).OrderByDescending(b => b.Source).ToList());

@@ -13,6 +13,7 @@ namespace ELibrary.Infrastructure.Services
 {
     public class GoogleService : LibraryServiceBase
     {
+        private const string ProviderName = "Google Books";
         private const string FullViewability = "ALL_PAGES";
 
         private readonly GoogleBooksSettings _settings;
@@ -35,13 +36,13 @@ namespace ELibrary.Infrastructure.Services
             {
                 var volume = await GetVolume(id);
                 if (volume == null)
-                    return Response<string>.Fail($"Book with id {id} not found");
+                    return Response<string>.NotFound($"Book with id {id} not found");
 
                 if (!IsFullyViewable(volume))
                 {
                     Logger.LogWarning("Google volume {Id} is not fully viewable (embeddable: {Embeddable}, viewability: {Viewability})",
                         id, volume.AccessInfo?.Embeddable, volume.AccessInfo?.Viewability);
-                    return Response<string>.Fail($"Book content not found for book {id}");
+                    return Response<string>.NotFound($"Book content not found for book {id}");
                 }
 
                 return Response<string>.Ok(ViewerHtml(id, volume.VolumeInfo.Title ?? UnknownTitle), "Book content retrieved successfully");
@@ -49,7 +50,7 @@ namespace ELibrary.Infrastructure.Services
             catch (Exception ex)
             {
                 Logger.LogError(ex, "Google book {Id} could not be retrieved", id);
-                return Response<string>.Fail("An error occurred getting book");
+                return Response<string>.FromProviderException(ex, ProviderName, $"Book with id {id} not found");
             }
         }
 
@@ -59,7 +60,7 @@ namespace ELibrary.Infrastructure.Services
             {
                 var volume = await GetVolume(id);
                 if (volume == null)
-                    return Response<BookSummary>.Fail($"Book with id {id} not found");
+                    return Response<BookSummary>.NotFound($"Book with id {id} not found");
 
                 var summary = new BookSummary
                 {
@@ -78,7 +79,7 @@ namespace ELibrary.Infrastructure.Services
             catch (Exception ex)
             {
                 Logger.LogError(ex, "Google summary for {Id} could not be retrieved", id);
-                return Response<BookSummary>.Fail("An error occurred getting book summary");
+                return Response<BookSummary>.FromProviderException(ex, ProviderName, $"Book with id {id} not found");
             }
         }
 
@@ -91,7 +92,7 @@ namespace ELibrary.Infrastructure.Services
                 if (string.IsNullOrEmpty(imageUrl))
                 {
                     Logger.LogWarning("Google volume {Id} has no cover image", id);
-                    return Response<FileContentResult>.Fail($"Image not found for book {id}");
+                    return Response<FileContentResult>.NotFound($"Image not found for book {id}");
                 }
 
                 return await DownloadImage(imageUrl, id);
@@ -99,7 +100,7 @@ namespace ELibrary.Infrastructure.Services
             catch (Exception ex)
             {
                 Logger.LogError(ex, "Google image for {Id} could not be retrieved", id);
-                return Response<FileContentResult>.Fail($"An error occurred getting image for book {id}");
+                return Response<FileContentResult>.FromProviderException(ex, ProviderName, $"Image not found for book {id}");
             }
         }
 
@@ -140,7 +141,7 @@ namespace ELibrary.Infrastructure.Services
             catch (Exception ex)
             {
                 Logger.LogError(ex, "Google search failed for '{Term}' page {Page}", term, currentPage);
-                return Response<SearchBookResponse>.Fail("An error occurred getting books");
+                return Response<SearchBookResponse>.FromProviderException(ex, ProviderName, "No books found");
             }
         }
 

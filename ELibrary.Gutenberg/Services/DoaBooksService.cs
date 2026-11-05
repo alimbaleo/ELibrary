@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using AngleSharp.Html.Parser;
 using ELibrary.Core.Configuration;
 using ELibrary.Core.Enums;
@@ -6,34 +6,37 @@ using ELibrary.Core.Helpers;
 using ELibrary.Core.Models;
 using ELibrary.Core.Services;
 using ELibrary.Infrastructure.Configuration;
-using ELibrary.Infrastructure.Models;
+using ELibrary.Infrastructure.Doab;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace ELibrary.Infrastructure.Services
 {
-    // Directory of Open Access Books (DSpace REST API). Currently not registered:
-    // directory.doabooks.org rejects the server's IP with 403.
+    // Directory of Open Access Books. DOAB's REST API only serves allow-listed addresses, so search
+    // and lookups come from the local catalogue that DoabCatalogueSyncService harvests over OAI-PMH.
     public class DoaBooksService : LibraryServiceBase
     {
-        private const string AuthorKey = "dc.contributor.author";
-        private const string EditorKey = "dc.contributor.editor";
-        private const string DescriptionKey = "dc.description.abstract";
-        private const string DownloadKey = "oapen.identifier.downloadUrl";
-        private const string ThumbnailBundle = "THUMBNAIL";
+        private const string ProviderName = "DOAB";
+        private const string CatalogueLoading = "The DOAB catalogue is still loading; try again in a few minutes";
 
+        private readonly IDoabCatalogueStore _catalogue;
+        private readonly DoabClient _doab;
         private readonly DoaBooksSettings _settings;
 
         public override BookSource Source => BookSource.DOA;
 
         public DoaBooksService(
+            IDoabCatalogueStore catalogue,
+            DoabClient doab,
             IApiClient client,
             IOptions<DoaBooksSettings> settings,
             IOptions<ELibrarySettings> apiSettings,
             ILogger<DoaBooksService> logger)
             : base(client, logger, apiSettings.Value)
         {
+            _catalogue = catalogue;
+            _doab = doab;
             _settings = settings.Value;
         }
 
@@ -41,157 +44,187 @@ namespace ELibrary.Infrastructure.Services
         {
             var summary = await GetBookSummaryById(id);
             if (!summary.Success)
-                return Response<string>.Fail(summary.Message);
+                return Response<string>.Failed(summary);
 
             return string.IsNullOrEmpty(summary.Data.ViewLink)
-                ? Response<string>.Fail($"Book content not found for book {id}")
+                ? Response<string>.NotFound($"Book content not found for book {id}")
                 : Response<string>.Ok(summary.Data.ViewLink, "Book content retrieved successfully");
         }
 
         public override async Task<Response<BookSummary>> GetBookSummaryById(string id)
         {
-            if (string.IsNullOrWhiteSpace(id))
-                return Response<BookSummary>.Fail("Book id is required");
-
             try
             {
-                var book = await Client.GetAsync<DoaBookResponseModel>($"{_settings.BaseUrl}/rest/items/{id}?expand=all");
-                if (book == null)
-                    return Response<BookSummary>.Fail($"Book with id {id} not found");
+                var lookup = FindInCatalogue(id);
+                if (!lookup.Success)
+                    return Response<BookSummary>.Failed(lookup);
 
-                var pdfLink = book.Bitstreams
-                    .SelectMany(b => b.Metadata)
-                    .FirstOrDefault(m => m.Key == DownloadKey)?.Value?.ToString();
-
-                if (string.IsNullOrEmpty(pdfLink))
+                var book = lookup.Data;
+                if (string.IsNullOrEmpty(book.DownloadUrl))
                 {
-                    Logger.LogWarning("DOA book {Id} has no download link", id);
-                    return Response<BookSummary>.Fail($"Book with id {id} not found");
+                    Logger.LogWarning("DOAB book {Id} has no download link", id);
+                    return Response<BookSummary>.NotFound($"No download link available for book {id}");
                 }
 
-                if (NeedsResolving(pdfLink))
-                {
-                    var resolved = await ResolvePdfLink(pdfLink);
-                    if (string.IsNullOrEmpty(resolved))
-                    {
-                        Logger.LogWarning("DOA book {Id} download link {Link} could not be resolved to a PDF", id, pdfLink);
-                        return Response<BookSummary>.Fail($"Book with id {id} not found");
-                    }
-                    pdfLink = resolved;
-                }
+                var pdfLink = NeedsResolving(book.DownloadUrl)
+                    ? await ResolvePdfLinkOrFallback(book.DownloadUrl, id)
+                    : book.DownloadUrl;
 
-                var metadata = book.Metadata.Select(m => (m.Key, (object?)m.Value)).ToList();
                 var summary = new BookSummary
                 {
-                    Id = id,
-                    Title = book.Name ?? UnknownTitle,
-                    Authors = AuthorsOf(metadata),
-                    Summary = DescriptionOf(metadata),
-                    ImageUrl = ImageUrlFor(ThumbnailId(book.Bitstreams.Select(b => (b.BundleName, b.Uuid)))),
+                    Id = book.Uuid,
+                    Title = book.Title,
+                    Authors = book.Authors.ToList(),
+                    Summary = SummaryOf(book),
+                    ImageUrl = ImageUrlFor(book.Uuid),
                     Source = Source,
-                    ViewLink = Util.IframeViewerHtml(pdfLink, book.Name ?? "PDF Viewer")
+                    ViewLink = Util.IframeViewerHtml(pdfLink, book.Title)
                 };
 
-                Logger.LogInformation("DOA summary for {Id} retrieved: '{Title}'", id, summary.Title);
+                Logger.LogInformation("DOAB summary for {Id} retrieved: '{Title}'", id, summary.Title);
                 return Response<BookSummary>.Ok(summary, "Book summary retrieved successfully");
             }
             catch (Exception ex)
             {
-                Logger.LogError(ex, "DOA summary for {Id} could not be retrieved", id);
-                return Response<BookSummary>.Fail("An error occurred getting book summary");
+                Logger.LogError(ex, "DOAB summary for {Id} could not be retrieved", id);
+                return Response<BookSummary>.FromProviderException(ex, ProviderName, $"Book with id {id} not found");
             }
         }
 
-        public override Task<Response<FileContentResult>> GetImageById(string id)
-            => DownloadImage($"{_settings.ImageUrl}/{id}/retrieve", id);
-
-        public override Task<Response<SearchBookResponse>> SearchBooks(int? page, string searchText)
-            => Search(page, searchText, SearchRoute, SearchParameter);
-
-        public override Task<Response<SearchBookResponse>> SearchBooksByTopic(int? page, string topic)
-            => Search(page, topic, TopicRoute, TopicParameter);
-
-        private async Task<Response<SearchBookResponse>> Search(int? page, string term, string route, string parameter)
+        public override async Task<Response<FileContentResult>> GetImageById(string id)
         {
-            if (string.IsNullOrWhiteSpace(term))
-                return Response<SearchBookResponse>.Fail("Book search text not found");
-
-            var currentPage = NormalizePage(page);
-            var limit = _settings.MaxResults;
-            var offset = (currentPage - 1) * limit;
-
             try
             {
-                var query = string.Join("+", term.Split(' ', StringSplitOptions.RemoveEmptyEntries));
-                var url = $"{_settings.BaseUrl}/rest/search?query=dc.title:{query}&limit={limit}&offset={offset}&expand=metadata,bitstreams";
+                var lookup = FindInCatalogue(id);
+                if (!lookup.Success)
+                    return Response<FileContentResult>.Failed(lookup);
 
-                var results = await Client.GetAsync<List<DoaBookResults>>(url) ?? new List<DoaBookResults>();
-                var books = results.Select(ToBook).ToList();
+                var book = lookup.Data;
+                var thumbnailUrl = book.ThumbnailUrl;
 
-                Logger.LogInformation("DOA returned {Count} books for '{Term}' page {Page}", books.Count, term, currentPage);
-
-                return Response<SearchBookResponse>.Ok(new SearchBookResponse
+                // A few harvested records lack a thumbnail URL; fetch it once over OAI-PMH and remember it
+                if (string.IsNullOrEmpty(thumbnailUrl) && !string.IsNullOrEmpty(book.Handle))
                 {
-                    Count = books.Count,
-                    NextPageUrl = books.Count == limit ? PageLink(route, parameter, term, currentPage + 1) : null,
-                    PreviousPageUrl = currentPage > 1 ? PageLink(route, parameter, term, currentPage - 1) : null,
-                    Data = books
-                }, "Books retrieved successfully");
+                    thumbnailUrl = (await _doab.GetRecordAsync(book.Handle, CancellationToken.None))?.ThumbnailUrl;
+                    if (!string.IsNullOrEmpty(thumbnailUrl))
+                        _catalogue.SetThumbnailUrl(book.Uuid, thumbnailUrl);
+                }
+
+                if (string.IsNullOrEmpty(thumbnailUrl))
+                {
+                    Logger.LogWarning("DOAB book {Id} has no thumbnail", id);
+                    return Response<FileContentResult>.NotFound($"Image not found for book {id}");
+                }
+
+                var (bytes, contentType) = await _doab.DownloadAsync(thumbnailUrl, CancellationToken.None);
+                Logger.LogInformation("DOAB image for {Id} downloaded ({Bytes} bytes, {ContentType})", id, bytes.Length, contentType);
+
+                var extension = contentType.Contains("png", StringComparison.OrdinalIgnoreCase) ? "png" : "jpg";
+                var file = new FileContentResult(bytes, contentType) { FileDownloadName = $"book_{book.Uuid}.{extension}" };
+                return Response<FileContentResult>.Ok(file, "Image retrieved successfully");
             }
             catch (Exception ex)
             {
-                Logger.LogError(ex, "DOA search failed for '{Term}' page {Page}", term, currentPage);
-                return Response<SearchBookResponse>.Fail("An error occurred getting books");
+                Logger.LogError(ex, "DOAB image for {Id} could not be retrieved", id);
+                return Response<FileContentResult>.FromProviderException(ex, ProviderName, $"Image not found for book {id}");
             }
         }
 
-        private Data ToBook(DoaBookResults result)
+        public override Task<Response<SearchBookResponse>> SearchBooks(int? page, string searchText)
+            => Search(page, searchText, DoabSearchField.TitleOrAuthor, SearchRoute, SearchParameter);
+
+        public override Task<Response<SearchBookResponse>> SearchBooksByTopic(int? page, string topic)
+            => Search(page, topic, DoabSearchField.Subject, TopicRoute, TopicParameter);
+
+        private Task<Response<SearchBookResponse>> Search(int? page, string term, DoabSearchField field, string route, string parameter)
         {
-            var metadata = (result.Metadata ?? new List<DoaMetaData>()).Select(m => (m.Key, (object?)m.Value)).ToList();
-            return new Data
+            if (string.IsNullOrWhiteSpace(term))
+                return Task.FromResult(Response<SearchBookResponse>.Fail("Book search text not found"));
+
+            var currentPage = NormalizePage(page);
+            var limit = _settings.MaxResults;
+
+            try
             {
-                Id = result.Uuid,
-                Title = result.Name ?? UnknownTitle,
-                Authors = AuthorsOf(metadata),
-                Summary = DescriptionOf(metadata),
-                ImageUrl = ImageUrlFor(ThumbnailId((result.Bitstreams ?? new List<BitstreamData>()).Select(b => (b.BundleName, b.Uuid)))),
-                Source = Source
-            };
+                var (items, total) = _catalogue.Search(term, field, limit, (currentPage - 1) * limit);
+
+                if (total == 0 && !_catalogue.IsReady)
+                    Logger.LogWarning("DOAB search for '{Term}' found nothing: catalogue still loading ({Count} items so far)", term, _catalogue.Count());
+                else
+                    Logger.LogInformation("DOAB returned {Count} of {Total} books for {Field} '{Term}' page {Page}", items.Count, total, field, term, currentPage);
+
+                return Task.FromResult(Response<SearchBookResponse>.Ok(new SearchBookResponse
+                {
+                    Count = total,
+                    NextPageUrl = currentPage * limit < total ? PageLink(route, parameter, term, currentPage + 1) : null,
+                    PreviousPageUrl = currentPage > 1 ? PageLink(route, parameter, term, currentPage - 1) : null,
+                    Data = items.Select(ToBook).ToList()
+                }, "Books retrieved successfully"));
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "DOAB {Field} search failed for '{Term}' page {Page}", field, term, currentPage);
+                return Task.FromResult(Response<SearchBookResponse>.UpstreamError("DOAB search failed"));
+            }
         }
 
-        // Editors stand in for authors only when no author is listed
-        private static List<string> AuthorsOf(List<(string Key, object? Value)> metadata)
+        private Response<DoabCatalogueEntry> FindInCatalogue(string id)
         {
-            var key = metadata.Any(m => m.Key == AuthorKey) ? AuthorKey : EditorKey;
-            return metadata
-                .Where(m => m.Key == key)
-                .Select(m => m.Value?.ToString() ?? string.Empty)
-                .Where(v => !string.IsNullOrEmpty(v))
-                .ToList();
+            if (string.IsNullOrWhiteSpace(id) || !Guid.TryParse(id, out _))
+                return Response<DoabCatalogueEntry>.NotFound($"Book with id {id} not found");
+
+            var book = _catalogue.Get(id);
+            if (book != null)
+                return Response<DoabCatalogueEntry>.Ok(book);
+
+            if (_catalogue.IsReady)
+                return Response<DoabCatalogueEntry>.NotFound($"Book with id {id} not found");
+
+            Logger.LogWarning("DOAB book {Id} not in catalogue yet: still loading ({Count} items so far)", id, _catalogue.Count());
+            return Response<DoabCatalogueEntry>.UpstreamError(CatalogueLoading);
         }
 
-        private static string DescriptionOf(List<(string Key, object? Value)> metadata)
+        private Data ToBook(DoabCatalogueEntry book) => new()
         {
-            var text = Util.TruncateText(metadata.FirstOrDefault(m => m.Key == DescriptionKey).Value?.ToString(), SummaryLength);
-            return string.IsNullOrEmpty(text) ? NoSummary : text;
-        }
+            Id = book.Uuid,
+            Title = book.Title,
+            Authors = book.Authors.ToList(),
+            Summary = SummaryOf(book),
+            ImageUrl = ImageUrlFor(book.Uuid),
+            Source = Source
+        };
 
-        private static string ThumbnailId(IEnumerable<(string BundleName, string Uuid)> bitstreams)
-            => bitstreams.FirstOrDefault(b => b.BundleName == ThumbnailBundle).Uuid ?? string.Empty;
+        private static string SummaryOf(DoabCatalogueEntry book)
+            => string.IsNullOrWhiteSpace(book.Abstract) ? NoSummary : Util.TruncateText(book.Abstract, SummaryLength);
 
         private static bool NeedsResolving(string link)
             => link.Contains("mdpi.com", StringComparison.OrdinalIgnoreCase)
                || link.Contains("doi.org", StringComparison.OrdinalIgnoreCase);
 
-        private async Task<string?> ResolvePdfLink(string link)
+        // Falls back to the original link so the reader at least opens the publisher's page
+        private async Task<string> ResolvePdfLinkOrFallback(string link, string id)
         {
-            return link.Contains("mdpi.com", StringComparison.OrdinalIgnoreCase)
-                ? await ScrapeMdpiDownloadLink(link)
-                : await ResolveThroughRewriteService(link);
+            try
+            {
+                var resolved = link.Contains("mdpi.com", StringComparison.OrdinalIgnoreCase)
+                    ? await ScrapeMdpiDownloadLink(link)
+                    : await ResolveThroughRewriteService(link);
+
+                if (!string.IsNullOrEmpty(resolved))
+                    return resolved;
+
+                Logger.LogWarning("DOAB book {Id}: no direct PDF found behind {Link}; using the original link", id, link);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "DOAB book {Id}: resolving {Link} failed; using the original link", id, link);
+            }
+
+            return link;
         }
 
-        // mdpi.com serves a landing page; the PDF is behind its "Free Download" anchor
-        // and the page only renders for browser-like requests.
+        // mdpi.com serves a landing page whose "Free Download" anchor holds the PDF, and only
+        // renders it for browser-like requests.
         private static async Task<string?> ScrapeMdpiDownloadLink(string pageUrl)
         {
             using var handler = new HttpClientHandler { AllowAutoRedirect = true, AutomaticDecompression = System.Net.DecompressionMethods.All };
@@ -214,6 +247,8 @@ namespace ELibrary.Infrastructure.Services
 
         private async Task<string?> ResolveThroughRewriteService(string link)
         {
+            if (string.IsNullOrEmpty(_settings.RewriteBaseUrl)) return null;
+
             var json = await Client.GetStringAsync(_settings.RewriteBaseUrl + Uri.EscapeDataString(link));
             using var document = JsonDocument.Parse(json);
 

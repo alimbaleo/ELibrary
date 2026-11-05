@@ -11,10 +11,12 @@ using Microsoft.Extensions.Options;
 
 namespace ELibrary.Infrastructure.Services
 {
-    // Book ids are Internet Archive identifiers; search comes from openlibrary.org,
-    // metadata, covers and the embedded reader from archive.org.
+    // Search comes from openlibrary.org; metadata, covers and the embedded reader from archive.org.
+    // Book ids are Internet Archive identifiers. Open Library work/edition keys (OL…W / OL…M),
+    // which earlier releases handed out, are accepted and resolved to the work's public scan.
     public class OpenLibraryService : LibraryServiceBase
     {
+        private const string ProviderName = "Open Library";
         private const string SearchFields = "key,title,author_name,first_sentence,cover_i,ia";
 
         private readonly OpenLibrarySettings _settings;
@@ -34,28 +36,38 @@ namespace ELibrary.Infrastructure.Services
 
         public override async Task<Response<string>> GetBookById(string id)
         {
-            if (string.IsNullOrWhiteSpace(id))
-                return Response<string>.Fail("Book id is required");
+            try
+            {
+                var archiveId = await ResolveArchiveId(id);
+                if (archiveId == null)
+                    return Response<string>.NotFound($"Book with id {id} not found");
 
-            var summary = await GetBookSummaryById(id);
-            var title = summary.Success ? summary.Data.Title : UnknownTitle;
+                var summary = await GetBookSummaryById(archiveId);
+                var title = summary.Success ? summary.Data.Title : UnknownTitle;
 
-            return Response<string>.Ok(Util.IframeViewerHtml(ReaderUrl(id), title), "Book content retrieved successfully");
+                return Response<string>.Ok(Util.IframeViewerHtml(ReaderUrl(archiveId), title), "Book content retrieved successfully");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Open Library book {Id} could not be retrieved", id);
+                return Response<string>.FromProviderException(ex, ProviderName, $"Book with id {id} not found");
+            }
         }
 
         public override async Task<Response<BookSummary>> GetBookSummaryById(string id)
         {
-            if (string.IsNullOrWhiteSpace(id))
-                return Response<BookSummary>.Fail("Book id is required");
-
             try
             {
-                var metadata = await Client.GetAsync<ArchiveMetadataResponse>($"{_settings.ArchiveUrl}/metadata/{Uri.EscapeDataString(id)}/metadata");
+                var archiveId = await ResolveArchiveId(id);
+                if (archiveId == null)
+                    return Response<BookSummary>.NotFound($"Book with id {id} not found");
+
+                var metadata = await Client.GetAsync<ArchiveMetadataResponse>($"{_settings.ArchiveUrl}/metadata/{Uri.EscapeDataString(archiveId)}/metadata");
                 var item = metadata?.Result;
                 if (item == null || string.IsNullOrEmpty(item.Identifier))
                 {
-                    Logger.LogWarning("Archive item {Id} has no metadata", id);
-                    return Response<BookSummary>.Fail($"Book with id {id} not found");
+                    Logger.LogWarning("Archive item {ArchiveId} has no metadata", archiveId);
+                    return Response<BookSummary>.NotFound($"Book with id {id} not found");
                 }
 
                 var description = Util.TruncateText(Util.StripHtml(item.DescriptionText()), SummaryLength);
@@ -67,7 +79,7 @@ namespace ELibrary.Infrastructure.Services
                     Summary = string.IsNullOrEmpty(description) ? NoSummary : description,
                     ImageUrl = ImageUrlFor(id),
                     Source = Source,
-                    ViewLink = ReaderUrl(id)
+                    ViewLink = ReaderUrl(archiveId)
                 };
 
                 Logger.LogInformation("Archive summary for {Id} retrieved: '{Title}'", id, summary.Title);
@@ -76,12 +88,26 @@ namespace ELibrary.Infrastructure.Services
             catch (Exception ex)
             {
                 Logger.LogError(ex, "Archive summary for {Id} could not be retrieved", id);
-                return Response<BookSummary>.Fail("An error occurred getting book summary");
+                return Response<BookSummary>.FromProviderException(ex, ProviderName, $"Book with id {id} not found");
             }
         }
 
-        public override Task<Response<FileContentResult>> GetImageById(string id)
-            => DownloadImage($"{_settings.ArchiveUrl}/services/img/{Uri.EscapeDataString(id)}", id);
+        public override async Task<Response<FileContentResult>> GetImageById(string id)
+        {
+            try
+            {
+                var archiveId = await ResolveArchiveId(id);
+                if (archiveId == null)
+                    return Response<FileContentResult>.NotFound($"Image not found for book {id}");
+
+                return await DownloadImage($"{_settings.ArchiveUrl}/services/img/{Uri.EscapeDataString(archiveId)}", id);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Open Library image for {Id} could not be retrieved", id);
+                return Response<FileContentResult>.FromProviderException(ex, ProviderName, $"Image not found for book {id}");
+            }
+        }
 
         public override Task<Response<SearchBookResponse>> SearchBooks(int? page, string searchText)
             => Search(page, searchText, "q", SearchRoute, SearchParameter);
@@ -124,8 +150,30 @@ namespace ELibrary.Infrastructure.Services
             catch (Exception ex)
             {
                 Logger.LogError(ex, "Open Library search failed for '{Term}' page {Page}", term, currentPage);
-                return Response<SearchBookResponse>.Fail("An error occurred getting books");
+                return Response<SearchBookResponse>.FromProviderException(ex, ProviderName, "No books found");
             }
+        }
+
+        // An archive identifier is returned as-is; an OL…W/OL…M key is looked up and the work's
+        // first public scan is used. Null when the key has no readable scan.
+        private async Task<string?> ResolveArchiveId(string id)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return null;
+            id = id.Trim();
+            if (!BookIdFormat.IsOpenLibraryKey(id)) return id;
+
+            var keyQuery = id.EndsWith('M') ? $"edition_key:{id}" : $"key:/works/{id}";
+            var url = $"{_settings.SearchUrl}?q={Uri.EscapeDataString($"{keyQuery} AND ebook_access:public")}&fields=ia&limit=1";
+
+            var result = await Client.GetAsync<OpenLibrarySearchResponse>(url);
+            var archiveId = result?.Docs?.FirstOrDefault()?.Ia?.FirstOrDefault(s => !string.IsNullOrWhiteSpace(s));
+
+            if (archiveId == null)
+                Logger.LogWarning("Open Library key {Key} has no public scan", id);
+            else
+                Logger.LogInformation("Open Library key {Key} resolved to archive item {ArchiveId}", id, archiveId);
+
+            return archiveId;
         }
 
         private Data ToBook(OpenLibraryDoc doc)
@@ -142,6 +190,6 @@ namespace ELibrary.Infrastructure.Services
             };
         }
 
-        private string ReaderUrl(string id) => $"{_settings.ArchiveUrl}/embed/{Uri.EscapeDataString(id)}";
+        private string ReaderUrl(string archiveId) => $"{_settings.ArchiveUrl}/embed/{Uri.EscapeDataString(archiveId)}";
     }
 }

@@ -24,6 +24,11 @@ namespace ELibrary.Infrastructure.Doab
         void Upsert(IReadOnlyCollection<DoabCatalogueEntry> entries);
         void DeleteByHandle(string handle);
         void SetThumbnailUrl(string uuid, string url);
+        void SetIsbns(string uuid, IReadOnlyList<string> isbns);
+
+        /// <summary>Records a cover lookup: the URL found, or null when no source had one.</summary>
+        void SetCover(string uuid, string? coverUrl, DateTimeOffset checkedAt);
+
         string? GetState(string key);
         void SetState(string key, string value);
     }
@@ -40,7 +45,8 @@ namespace ELibrary.Infrastructure.Doab
 
         private const string Separator = "||";
         private const string Columns =
-            "b.uuid, b.handle, b.title, b.authors, b.abstract, b.type, b.subjects, b.download_url, b.thumbnail_url, b.last_modified";
+            "b.uuid, b.handle, b.title, b.authors, b.abstract, b.type, b.subjects, b.download_url, b.thumbnail_url, b.last_modified, " +
+            "b.isbns, b.cover_url, b.cover_checked_at";
 
         private readonly string _connectionString;
 
@@ -133,8 +139,8 @@ namespace ELibrary.Infrastructure.Doab
             using var cmd = conn.CreateCommand();
             cmd.Transaction = tx;
             cmd.CommandText = """
-                INSERT INTO books (uuid, handle, title, authors, abstract, type, subjects, download_url, thumbnail_url, last_modified)
-                VALUES ($uuid, $handle, $title, $authors, $abstract, $type, $subjects, $download_url, $thumbnail_url, $last_modified)
+                INSERT INTO books (uuid, handle, title, authors, abstract, type, subjects, download_url, thumbnail_url, last_modified, isbns)
+                VALUES ($uuid, $handle, $title, $authors, $abstract, $type, $subjects, $download_url, $thumbnail_url, $last_modified, $isbns)
                 ON CONFLICT(uuid) DO UPDATE SET
                     handle = excluded.handle,
                     title = excluded.title,
@@ -144,7 +150,8 @@ namespace ELibrary.Infrastructure.Doab
                     subjects = excluded.subjects,
                     download_url = excluded.download_url,
                     thumbnail_url = COALESCE(excluded.thumbnail_url, books.thumbnail_url),
-                    last_modified = COALESCE(excluded.last_modified, books.last_modified)
+                    last_modified = COALESCE(excluded.last_modified, books.last_modified),
+                    isbns = COALESCE(excluded.isbns, books.isbns)
                 """;
 
             var pUuid = cmd.Parameters.Add("$uuid", SqliteType.Text);
@@ -157,6 +164,7 @@ namespace ELibrary.Infrastructure.Doab
             var pDownload = cmd.Parameters.Add("$download_url", SqliteType.Text);
             var pThumb = cmd.Parameters.Add("$thumbnail_url", SqliteType.Text);
             var pModified = cmd.Parameters.Add("$last_modified", SqliteType.Text);
+            var pIsbns = cmd.Parameters.Add("$isbns", SqliteType.Text);
             cmd.Prepare();
 
             foreach (var e in entries)
@@ -171,6 +179,7 @@ namespace ELibrary.Infrastructure.Doab
                 pDownload.Value = (object?)e.DownloadUrl ?? DBNull.Value;
                 pThumb.Value = (object?)e.ThumbnailUrl ?? DBNull.Value;
                 pModified.Value = (object?)e.LastModified?.ToString("O", CultureInfo.InvariantCulture) ?? DBNull.Value;
+                pIsbns.Value = Join(e.Isbns);
                 cmd.ExecuteNonQuery();
             }
 
@@ -192,6 +201,27 @@ namespace ELibrary.Infrastructure.Doab
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "UPDATE books SET thumbnail_url = $url WHERE uuid = $uuid";
             cmd.Parameters.AddWithValue("$url", url);
+            cmd.Parameters.AddWithValue("$uuid", uuid.Trim().ToLowerInvariant());
+            cmd.ExecuteNonQuery();
+        }
+
+        public void SetIsbns(string uuid, IReadOnlyList<string> isbns)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE books SET isbns = $isbns WHERE uuid = $uuid";
+            cmd.Parameters.AddWithValue("$isbns", Join(isbns));
+            cmd.Parameters.AddWithValue("$uuid", uuid.Trim().ToLowerInvariant());
+            cmd.ExecuteNonQuery();
+        }
+
+        public void SetCover(string uuid, string? coverUrl, DateTimeOffset checkedAt)
+        {
+            using var conn = Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE books SET cover_url = $url, cover_checked_at = $checked WHERE uuid = $uuid";
+            cmd.Parameters.AddWithValue("$url", (object?)coverUrl ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$checked", checkedAt.ToString("O", CultureInfo.InvariantCulture));
             cmd.Parameters.AddWithValue("$uuid", uuid.Trim().ToLowerInvariant());
             cmd.ExecuteNonQuery();
         }
@@ -271,7 +301,10 @@ namespace ELibrary.Infrastructure.Doab
                 CREATE TRIGGER IF NOT EXISTS books_ad AFTER DELETE ON books BEGIN
                     INSERT INTO books_fts (books_fts, rowid, title, authors, subjects) VALUES ('delete', old.rowid, old.title, old.authors, old.subjects);
                 END;
-                CREATE TRIGGER IF NOT EXISTS books_au AFTER UPDATE ON books BEGIN
+                -- Re-index only when a searchable column changes (not for cover/ISBN updates). Recreated each
+                -- start so catalogues made by earlier versions pick up the narrower trigger.
+                DROP TRIGGER IF EXISTS books_au;
+                CREATE TRIGGER books_au AFTER UPDATE OF title, authors, subjects ON books BEGIN
                     INSERT INTO books_fts (books_fts, rowid, title, authors, subjects) VALUES ('delete', old.rowid, old.title, old.authors, old.subjects);
                     INSERT INTO books_fts (rowid, title, authors, subjects) VALUES (new.rowid, new.title, new.authors, new.subjects);
                 END;
@@ -282,6 +315,26 @@ namespace ELibrary.Infrastructure.Doab
                 );
                 """;
             cmd.ExecuteNonQuery();
+
+            AddColumnIfMissing(conn, "isbns", "TEXT");
+            AddColumnIfMissing(conn, "cover_url", "TEXT");
+            AddColumnIfMissing(conn, "cover_checked_at", "TEXT");
+        }
+
+        // Upgrades catalogues created by earlier versions in place, without a re-harvest.
+        private static void AddColumnIfMissing(SqliteConnection conn, string column, string type)
+        {
+            using (var check = conn.CreateCommand())
+            {
+                check.CommandText = "SELECT count(*) FROM pragma_table_info('books') WHERE name = $name";
+                check.Parameters.AddWithValue("$name", column);
+                if (Convert.ToInt32(check.ExecuteScalar(), CultureInfo.InvariantCulture) > 0)
+                    return;
+            }
+
+            using var alter = conn.CreateCommand();
+            alter.CommandText = $"ALTER TABLE books ADD COLUMN {column} {type}";
+            alter.ExecuteNonQuery();
         }
 
         private static DoabCatalogueEntry ReadEntry(SqliteDataReader r) => new()
@@ -295,10 +348,16 @@ namespace ELibrary.Infrastructure.Doab
             Subjects = Split(r.IsDBNull(6) ? null : r.GetString(6)),
             DownloadUrl = r.IsDBNull(7) ? null : r.GetString(7),
             ThumbnailUrl = r.IsDBNull(8) ? null : r.GetString(8),
-            LastModified = r.IsDBNull(9)
-                ? null
-                : DateTimeOffset.TryParse(r.GetString(9), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var d) ? d : null
+            LastModified = ParseDate(r, 9),
+            Isbns = Split(r.IsDBNull(10) ? null : r.GetString(10)),
+            CoverUrl = r.IsDBNull(11) ? null : r.GetString(11),
+            CoverCheckedAt = ParseDate(r, 12)
         };
+
+        private static DateTimeOffset? ParseDate(SqliteDataReader r, int ordinal) =>
+            r.IsDBNull(ordinal)
+                ? null
+                : DateTimeOffset.TryParse(r.GetString(ordinal), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var d) ? d : null;
 
         private static object Join(IReadOnlyList<string> values) =>
             values.Count == 0 ? DBNull.Value : string.Join(Separator, values);

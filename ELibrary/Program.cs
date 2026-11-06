@@ -42,6 +42,7 @@ namespace ELibrary
             // OAI-PMH feed into a local SQLite store and kept current in the background.
             builder.Services.AddSingleton<IDoabCatalogueStore, DoabCatalogueStore>();
             builder.Services.AddHttpClient<DoabClient>();
+            builder.Services.AddScoped<DoabCoverFinder>();
             builder.Services.AddHostedService<DoabCatalogueSyncService>();
 
             builder.Services.AddScoped<LibraryCoordinator>();

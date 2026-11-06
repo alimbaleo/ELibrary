@@ -72,6 +72,20 @@ namespace ELibrary.Infrastructure.Doab
             return new DoabOaiPage(entries, deleted, string.IsNullOrEmpty(token) ? null : token, size, cursor);
         }
 
+        /// <summary>Strips hyphens/spaces; returns null unless it's a 10- or 13-character ISBN.</summary>
+        public static string? NormalizeIsbn(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+            var isbn = new string(value.Where(c => char.IsDigit(c) || c is 'X' or 'x').ToArray()).ToUpperInvariant();
+            if (isbn.Length is not (10 or 13))
+                return null;
+
+            // Placeholder ISBNs such as 9780000000002 are attached to many unrelated books.
+            var core = isbn.Length == 13 ? isbn[3..12] : isbn[..9];
+            return core.All(c => c == '0') ? null : isbn;
+        }
+
         public static string? HandleFromOaiIdentifier(string? oaiIdentifier)
         {
             // oai:directory.doabooks.org:20.500.12854/62823 -> 20.500.12854/62823
@@ -120,7 +134,14 @@ namespace ELibrary.Infrastructure.Doab
                     .ToList(),
                 DownloadUrl = string.IsNullOrEmpty(downloadUrl) ? null : downloadUrl,
                 ThumbnailUrl = thumbnailUrl,
-                LastModified = lastModified
+                LastModified = lastModified,
+                Isbns = Values(metadata, "oapen", "relation", "isbn")
+                    .Concat(Values(metadata, "dc", "identifier", "isbn"))
+                    .Select(NormalizeIsbn)
+                    .Where(i => i != null)
+                    .Select(i => i!)
+                    .Distinct()
+                    .ToList()
             };
         }
 

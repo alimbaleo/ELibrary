@@ -20,7 +20,19 @@ namespace ELibrary.Infrastructure.Doab
         public IReadOnlyList<string> Subjects { get; init; } = Array.Empty<string>();
 
         public string? DownloadUrl { get; init; }
+
+        /// <summary>DOAB's own thumbnail. DOAB now serves these only to browsers (Anubis), so they're not used by default.</summary>
         public string? ThumbnailUrl { get; init; }
+
         public DateTimeOffset? LastModified { get; init; }
+
+        /// <summary>ISBNs (digits only), used to find a cover from Google Books or Open Library.</summary>
+        public IReadOnlyList<string> Isbns { get; init; } = Array.Empty<string>();
+
+        /// <summary>Cover image URL found from another source, cached once looked up.</summary>
+        public string? CoverUrl { get; init; }
+
+        /// <summary>When a cover was last looked up; with no <see cref="CoverUrl"/> this means none was found.</summary>
+        public DateTimeOffset? CoverCheckedAt { get; init; }
     }
 }

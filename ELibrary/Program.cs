@@ -36,7 +36,9 @@ namespace ELibrary
             builder.Services.AddScoped<ILibraryService, GutenbergService>();
             builder.Services.AddScoped<ILibraryService, GoogleService>();
             builder.Services.AddScoped<ILibraryService, OpenLibraryService>();
-            builder.Services.AddScoped<ILibraryService, DoaBooksService>();
+            // DOAB disabled: OAPEN/publisher PDFs rate-limit readers by IP. The catalogue below keeps
+            // syncing so DOAB can be re-enabled without a fresh multi-hour harvest.
+            // builder.Services.AddScoped<ILibraryService, DoaBooksService>();
 
             // DOAB's REST API is allow-list only, so its catalogue is harvested from the public
             // OAI-PMH feed into a local SQLite store and kept current in the background.

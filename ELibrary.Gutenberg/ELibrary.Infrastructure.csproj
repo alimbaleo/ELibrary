@@ -10,4 +10,9 @@
     <ProjectReference Include="..\ELibrary.Core\ELibrary.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="AngleSharp" Version="1.4.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+  </ItemGroup>
+
 </Project>

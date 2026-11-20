@@ -1,66 +1,64 @@
-﻿using Microsoft.AspNetCore.Authentication;
-using Microsoft.Extensions.Options;
-using System.Net.Http.Headers;
+﻿using System.Net.Http.Headers;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Encodings.Web;
-using static Newtonsoft.Json.JsonConvert;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.Extensions.Options;
 
 namespace ELibrary.Filters
 {
-
     public class BasicAuthenticationHandler : AuthenticationHandler<AuthenticationSchemeOptions>
     {
+        public const string SchemeName = "BasicAuthentication";
+
         private readonly List<OAuthUser> _users;
-        private readonly ILogger<BasicAuthenticationHandler> _logger;
+
         public BasicAuthenticationHandler(
             IOptionsMonitor<AuthenticationSchemeOptions> options,
-            ILoggerFactory logger,
+            ILoggerFactory loggerFactory,
             UrlEncoder encoder,
-            ISystemClock clock,
             IConfiguration configuration)
-            : base(options, logger, encoder, clock) 
+            : base(options, loggerFactory, encoder)
         {
-            _users = [.. configuration.GetSection("OAuthUsers").GetChildren().Select(static s => new OAuthUser { Password = s.GetValue<string>("Password") ?? string.Empty, Username = s.GetValue<string>("Username") ?? string.Empty })];       
-            _logger = logger.CreateLogger<BasicAuthenticationHandler>();
+            _users = configuration.GetSection("OAuthUsers").Get<List<OAuthUser>>() ?? new List<OAuthUser>();
         }
 
-        protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
+        protected override Task<AuthenticateResult> HandleAuthenticateAsync()
         {
-            if (!Request.Headers.ContainsKey("Authorization"))
-                return AuthenticateResult.Fail("Missing Authorization Header");
+            if (!Request.Headers.TryGetValue("Authorization", out var header))
+                return Task.FromResult(AuthenticateResult.Fail("Missing Authorization Header"));
 
+            string? username = null;
             try
             {
-                var authHeader = AuthenticationHeaderValue.Parse(Request.Headers["Authorization"]);
-                var credentialBytes = Convert.FromBase64String(authHeader.Parameter);
-                var credentials = Encoding.UTF8.GetString(credentialBytes).Split(':', 2);
-                var username = credentials[0];
-                var password = credentials[1];
+                var parsed = AuthenticationHeaderValue.Parse(header!);
+                var credentials = Encoding.UTF8.GetString(Convert.FromBase64String(parsed.Parameter ?? string.Empty)).Split(':', 2);
+                username = credentials[0];
+                var password = credentials.Length > 1 ? credentials[1] : string.Empty;
 
-                var authenticatedUser = _users.FirstOrDefault(u => u.Username.ToLower() == username?.ToLower() && u.Password == password);
+                var user = _users.FirstOrDefault(u =>
+                    string.Equals(u.Username, username, StringComparison.OrdinalIgnoreCase) && u.Password == password);
 
-                if (authenticatedUser == null)
+                if (user == null)
                 {
-                    _logger.LogWarning("Authentication failed for user {Username}", username);
-                    return AuthenticateResult.Fail("Invalid Username or Password");
+                    Logger.LogWarning("Authentication failed for user {Username} from {RemoteIp}", username, Context.Connection.RemoteIpAddress);
+                    return Task.FromResult(AuthenticateResult.Fail("Invalid Username or Password"));
                 }
 
-                var claims = new[] {
-                new Claim(ClaimTypes.NameIdentifier, username),
-                new Claim(ClaimTypes.Name, username),
-            };
-                var identity = new ClaimsIdentity(claims, Scheme.Name);
-                var principal = new ClaimsPrincipal(identity);
-                var ticket = new AuthenticationTicket(principal, Scheme.Name);
+                var identity = new ClaimsIdentity(new[]
+                {
+                    new Claim(ClaimTypes.NameIdentifier, user.Username),
+                    new Claim(ClaimTypes.Name, user.Username)
+                }, Scheme.Name);
 
-                return AuthenticateResult.Success(ticket);
+                Logger.LogDebug("Authenticated user {Username}", user.Username);
+                return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name)));
             }
-            catch
+            catch (Exception ex)
             {
-                return AuthenticateResult.Fail("Invalid Authorization Header");
+                Logger.LogWarning(ex, "Malformed Authorization header for user {Username}", username);
+                return Task.FromResult(AuthenticateResult.Fail("Invalid Authorization Header"));
             }
         }
     }
-
 }
